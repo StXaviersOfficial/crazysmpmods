@@ -85,6 +85,26 @@ public class AnnouncementManager {
     }
 
     /**
+     * Manually trigger a 10-second countdown + announcement (for /ca test).
+     * Bypasses the periodic scheduler — fires immediately.
+     */
+    public void triggerTestCountdown() {
+        // Cancel any running countdown first
+        if (countdownTaskId != null) {
+            Bukkit.getScheduler().cancelTask(countdownTaskId);
+            countdownTaskId = null;
+        }
+        onMainFire();
+    }
+
+    /**
+     * Fire an announcement immediately, skipping the countdown (for /ca now).
+     */
+    public void triggerImmediate() {
+        broadcastAnnouncement();
+    }
+
+    /**
      * Main task body: triggers the 10-second countdown, which then fires
      * the actual announcement at T-0.
      */
@@ -180,8 +200,15 @@ public class AnnouncementManager {
                     // Offline
                     if (cfg.getOfflineHandling() == PluginConfig.OfflineHandling.SHOW) {
                         Location last = plugin.getOfflinePositionCache().getCachedLocation(cp.uuid());
-                        if (last != null) {
-                            result.add(PlayerCoordinate.offline(cp.name(), last));
+                        com.crazysmpmods.coordinateannouncer.model.Dimension cachedDim =
+                                plugin.getOfflinePositionCache().getCachedDimension(cp.uuid());
+                        if (last != null && cachedDim != null) {
+                            // Use the cached dimension (handles unloaded worlds correctly)
+                            result.add(new PlayerCoordinate(
+                                    cp.name(),
+                                    last.getBlockX(), last.getBlockY(), last.getBlockZ(),
+                                    cachedDim,
+                                    false));
                         } else {
                             // No cached position — show "unknown" line
                             result.add(new PlayerCoordinate(
@@ -206,13 +233,28 @@ public class AnnouncementManager {
      * Runnable that fires every 1 second during the countdown.
      * Tracks elapsed seconds; sends warnings at 10, 5, 4, 3, 2, 1 seconds
      * remaining; at 0s, fires the announcement and self-cancels.
+     *
+     * Defensive: includes a hard max-iteration guard (TOTAL + 5) so that even
+     * if the cancelTask call somehow fails, the countdown still self-terminates
+     * instead of looping forever.
      */
     private class CountdownRunnable implements Runnable {
         private int elapsed = 0;
         private static final int TOTAL = 10; // 10-second countdown
+        private static final int MAX_ITERATIONS = TOTAL + 5; // hard guard
 
         @Override
         public void run() {
+            // Hard guard: if we've been running too long, force-cancel
+            if (elapsed > MAX_ITERATIONS) {
+                plugin.getLogger().warning("CountdownRunnable exceeded max iterations — force-cancelling.");
+                if (countdownTaskId != null) {
+                    Bukkit.getScheduler().cancelTask(countdownTaskId);
+                    countdownTaskId = null;
+                }
+                return;
+            }
+
             int remaining = TOTAL - elapsed;
 
             if (remaining == 10) {

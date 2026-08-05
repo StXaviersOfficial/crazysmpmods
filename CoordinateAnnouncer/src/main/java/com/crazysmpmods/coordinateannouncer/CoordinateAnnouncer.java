@@ -93,12 +93,12 @@ public final class CoordinateAnnouncer extends JavaPlugin {
         if (announcementManager != null) {
             announcementManager.stop();
         }
-        // Save any pending state
+        // Save any pending state (synchronous — server is shutting down)
         if (pluginConfig != null) {
             pluginConfig.save();
         }
         if (offlinePositionCache != null) {
-            offlinePositionCache.save();
+            offlinePositionCache.flush();
         }
         getLogger().info("CoordinateAnnouncer disabled. Settings persisted.");
     }

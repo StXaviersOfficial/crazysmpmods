@@ -26,6 +26,21 @@ import java.util.stream.Collectors;
  *
  * Permission: coordinateannouncer.admin (default: OP — see plugin.yml).
  * Tab-completion is provided for all subcommands.
+ *
+ * Subcommands:
+ *   toggle              — enable/disable announcements
+ *   gui                 — open chest GUI
+ *   delay <v> <unit>    — set delay
+ *   player add|remove|list|clear [name]
+ *   mode all|custom
+ *   offline show|skip
+ *   test                — fire one announcement immediately WITH countdown (skip delay)
+ *   now                 — fire one announcement immediately WITHOUT countdown
+ *   status              — alias for info
+ *   info                — show current settings
+ *   purge               — clear all cached positions
+ *   reload              — reload config from disk
+ *   help                — show help
  */
 public class CACommand implements CommandExecutor, TabCompleter {
 
@@ -52,7 +67,10 @@ public class CACommand implements CommandExecutor, TabCompleter {
             case "player" -> handlePlayer(sender, args);
             case "mode"   -> handleMode(sender, args);
             case "offline"-> handleOffline(sender, args);
-            case "info"   -> handleInfo(sender);
+            case "test"   -> handleTest(sender);
+            case "now"    -> handleNow(sender);
+            case "info", "status" -> handleInfo(sender);
+            case "purge"  -> handlePurge(sender);
             case "reload" -> handleReload(sender);
             case "help"   -> sendHelp(sender, label);
             default -> {
@@ -78,6 +96,7 @@ public class CACommand implements CommandExecutor, TabCompleter {
                     + " §7| Offline: §e" + cfg.getOfflineHandling());
             sender.sendMessage("§7First announcement in §e" + cfg.getDelayValue() + " "
                     + cfg.getDelayUnit().displayName().toLowerCase() + "§7 (with 10s countdown).");
+            sender.sendMessage("§7Use §e/ca test §7to fire one immediately.");
         } else {
             plugin.getAnnouncementManager().stop();
             sender.sendMessage(ColorScheme.info("Coordinate Announcer §cDISABLED§f."));
@@ -146,39 +165,50 @@ public class CACommand implements CommandExecutor, TabCompleter {
                     sender.sendMessage(ColorScheme.error("Usage: §e/ca player add <name>"));
                     return;
                 }
-                String name = args[2];
-                UUID uuid = NpcFilter.lookupUuid(name);
-                if (uuid == null) {
-                    sender.sendMessage(ColorScheme.error("Player §e" + name + "§f not found."));
-                    return;
-                }
-                // Get the canonical name
-                String canonicalName = name;
-                Player online = Bukkit.getPlayer(uuid);
-                if (online != null) canonicalName = online.getName();
-                else {
-                    OfflinePlayer op = Bukkit.getOfflinePlayer(uuid);
-                    if (op.getName() != null) canonicalName = op.getName();
-                }
+                final String name = args[2];
+                // Use async lookup to avoid blocking the main thread
+                sender.sendMessage(ColorScheme.info("Looking up §e" + name + "§f..."));
+                NpcFilter.lookupUuidAsync(name, uuid -> {
+                    if (uuid == null) {
+                        sender.sendMessage(ColorScheme.error("Player §e" + name + "§f not found."));
+                        return;
+                    }
+                    // Get the canonical name
+                    String canonicalName = name;
+                    Player online = Bukkit.getPlayer(uuid);
+                    if (online != null && online.getName() != null) {
+                        canonicalName = online.getName();
+                    } else {
+                        OfflinePlayer op = Bukkit.getOfflinePlayer(uuid);
+                        if (op.getName() != null) canonicalName = op.getName();
+                    }
 
-                boolean added = plugin.getPluginConfig().addCustomPlayer(new CustomPlayer(uuid, canonicalName));
-                if (added) {
-                    sender.sendMessage(ColorScheme.success("Added §e" + canonicalName + "§f to custom list."));
-                } else {
-                    sender.sendMessage(ColorScheme.info("§e" + canonicalName + "§f is already on the custom list."));
-                }
+                    boolean added = plugin.getPluginConfig().addCustomPlayer(new CustomPlayer(uuid, canonicalName));
+                    if (added) {
+                        sender.sendMessage(ColorScheme.success("Added §e" + canonicalName + "§f to custom list."));
+                    } else {
+                        sender.sendMessage(ColorScheme.info("§e" + canonicalName + "§f is already on the custom list."));
+                    }
+                });
             }
             case "remove" -> {
                 if (args.length < 3) {
-                    sender.sendMessage(ColorScheme.error("Usage: §e/ca player remove <name>"));
+                    sender.sendMessage(ColorScheme.error("Usage: §e/ca player remove <name|uuid>"));
                     return;
                 }
-                String name = args[2];
-                boolean removed = plugin.getPluginConfig().removeCustomPlayerByName(name);
-                if (removed) {
-                    sender.sendMessage(ColorScheme.success("Removed §e" + name + "§f from custom list."));
+                final String nameOrUuid = args[2];
+                // First, try UUID
+                UUID directUuid = NpcFilter.safeParseUuid(nameOrUuid);
+                boolean removed;
+                if (directUuid != null) {
+                    removed = plugin.getPluginConfig().removeCustomPlayer(directUuid);
                 } else {
-                    sender.sendMessage(ColorScheme.error("§e" + name + "§f is not on the custom list."));
+                    removed = plugin.getPluginConfig().removeCustomPlayerByName(nameOrUuid);
+                }
+                if (removed) {
+                    sender.sendMessage(ColorScheme.success("Removed §e" + nameOrUuid + "§f from custom list."));
+                } else {
+                    sender.sendMessage(ColorScheme.error("§e" + nameOrUuid + "§f is not on the custom list."));
                 }
             }
             case "list" -> {
@@ -242,6 +272,26 @@ public class CACommand implements CommandExecutor, TabCompleter {
         }
     }
 
+    private void handleTest(@NotNull CommandSender sender) {
+        if (!plugin.getPluginConfig().isEnabled()) {
+            sender.sendMessage(ColorScheme.error("Plugin is disabled. Use §e/ca toggle §ffirst."));
+            return;
+        }
+        sender.sendMessage(ColorScheme.info("Triggering test announcement WITH 10s countdown..."));
+        plugin.getAnnouncementManager().triggerTestCountdown();
+    }
+
+    private void handleNow(@NotNull CommandSender sender) {
+        sender.sendMessage(ColorScheme.info("Triggering immediate announcement (no countdown)..."));
+        plugin.getAnnouncementManager().triggerImmediate();
+    }
+
+    private void handlePurge(@NotNull CommandSender sender) {
+        int n = plugin.getOfflinePositionCache().size();
+        plugin.getOfflinePositionCache().clear();
+        sender.sendMessage(ColorScheme.success("Purged §e" + n + "§f cached positions from data.yml."));
+    }
+
     private void handleInfo(@NotNull CommandSender sender) {
         PluginConfig cfg = plugin.getPluginConfig();
         sender.sendMessage(ColorScheme.DIVIDER);
@@ -257,6 +307,7 @@ public class CACommand implements CommandExecutor, TabCompleter {
         sender.sendMessage("§7NPC filter:    §e" + (cfg.isFilterNpcs() ? "ON" : "OFF"));
         sender.sendMessage("§7Countdown:     §e" + (cfg.isCountdownGlobal() ? "GLOBAL" : "RECIPIENTS ONLY"));
         sender.sendMessage("§7Task running:  §e" + (plugin.getAnnouncementManager().isRunning() ? "YES" : "NO"));
+        sender.sendMessage("§7Countdown now: §e" + (plugin.getAnnouncementManager().isCountdownActive() ? "YES" : "NO"));
         sender.sendMessage(ColorScheme.DIVIDER);
     }
 
@@ -286,14 +337,17 @@ public class CACommand implements CommandExecutor, TabCompleter {
         sender.sendMessage("§e/" + label + " gui §7- Open the chest customization menu");
         sender.sendMessage("§e/" + label + " delay <value> <unit> §7- Set delay (units: seconds, minutes, hours, days)");
         sender.sendMessage("§e/" + label + " player add <name> §7- Add player to custom list");
-        sender.sendMessage("§e/" + label + " player remove <name> §7- Remove player from custom list");
+        sender.sendMessage("§e/" + label + " player remove <name|uuid> §7- Remove player from custom list");
         sender.sendMessage("§e/" + label + " player list §7- List custom players");
         sender.sendMessage("§e/" + label + " player clear §7- Clear custom player list");
         sender.sendMessage("§e/" + label + " mode all §7- Announce ALL online players");
         sender.sendMessage("§e/" + label + " mode custom §7- Announce ONLY custom-listed players");
         sender.sendMessage("§e/" + label + " offline show §7- Show offline players with last-known coords");
         sender.sendMessage("§e/" + label + " offline skip §7- Skip offline players silently");
-        sender.sendMessage("§e/" + label + " info §7- Show current settings");
+        sender.sendMessage("§e/" + label + " test §7- Fire one announcement WITH 10s countdown");
+        sender.sendMessage("§e/" + label + " now §7- Fire one announcement immediately (no countdown)");
+        sender.sendMessage("§e/" + label + " status §7- Show current settings (alias: info)");
+        sender.sendMessage("§e/" + label + " purge §7- Clear all cached positions from data.yml");
         sender.sendMessage("§e/" + label + " reload §7- Reload config from disk");
         sender.sendMessage("§e/" + label + " help §7- Show this help");
         sender.sendMessage(ColorScheme.DIVIDER);
@@ -302,7 +356,8 @@ public class CACommand implements CommandExecutor, TabCompleter {
     // ── Tab completion ───────────────────────────────────────────────────
 
     private static final List<String> SUBS = Arrays.asList(
-            "toggle", "gui", "delay", "player", "mode", "offline", "info", "reload", "help");
+            "toggle", "gui", "delay", "player", "mode", "offline",
+            "test", "now", "info", "status", "purge", "reload", "help");
     private static final List<String> PLAYER_SUBS = Arrays.asList(
             "add", "remove", "list", "clear");
     private static final List<String> MODE_SUBS = Arrays.asList("all", "custom");
@@ -330,7 +385,9 @@ public class CACommand implements CommandExecutor, TabCompleter {
                     if (args[1].equalsIgnoreCase("add") || args[1].equalsIgnoreCase("remove")) {
                         // Suggest online players
                         List<String> names = new ArrayList<>();
-                        for (Player p : Bukkit.getOnlinePlayers()) names.add(p.getName());
+                        for (Player p : Bukkit.getOnlinePlayers()) {
+                            if (p.getName() != null) names.add(p.getName());
+                        }
                         // Also add offline players from the custom list for remove
                         if (args[1].equalsIgnoreCase("remove")) {
                             for (CustomPlayer cp : plugin.getPluginConfig().getCustomPlayers()) {

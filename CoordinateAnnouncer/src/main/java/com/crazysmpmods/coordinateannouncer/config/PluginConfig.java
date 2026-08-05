@@ -246,10 +246,12 @@ public class PluginConfig {
 
     public boolean removeCustomPlayer(@NotNull UUID uuid) {
         lock.lock();
+        boolean removed;
         try {
-            return customPlayers.removeIf(cp -> cp.uuid().equals(uuid));
+            removed = customPlayers.removeIf(cp -> cp.uuid().equals(uuid));
         } finally { lock.unlock(); }
-        // Note: save() not called inside finally — call explicitly
+        if (removed) save();
+        return removed;
     }
 
     public boolean removeCustomPlayerByName(@NotNull String name) {

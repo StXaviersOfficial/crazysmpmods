@@ -7,7 +7,6 @@ import com.crazysmpmods.coordinateannouncer.model.DelayUnit;
 import com.crazysmpmods.coordinateannouncer.util.ColorScheme;
 import net.kyori.adventure.text.Component;
 import org.bukkit.Bukkit;
-import org.bukkit.ChatColor;
 import org.bukkit.Material;
 import org.bukkit.OfflinePlayer;
 import org.bukkit.entity.Player;
@@ -16,6 +15,7 @@ import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.InventoryCloseEvent;
+import org.bukkit.event.inventory.InventoryDragEvent;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.InventoryHolder;
 import org.bukkit.inventory.ItemStack;
@@ -41,6 +41,8 @@ public class GUIManager implements Listener {
 
     private final CoordinateAnnouncer plugin;
     private final Map<UUID, GUISession> sessions = new HashMap<>();
+    // Tracks the active chat-input listener per player so we never stack duplicates.
+    private final Map<UUID, ChatInputListener> activeChatListeners = new HashMap<>();
 
     public GUIManager(@NotNull CoordinateAnnouncer plugin) {
         this.plugin = plugin;
@@ -314,21 +316,31 @@ public class GUIManager implements Listener {
 
     @EventHandler(priority = EventPriority.HIGH)
     public void onClick(InventoryClickEvent e) {
-        if (!(e.getClickedInventory() instanceof InventoryHolder h) || !(h instanceof GUIHolder gh)) {
-            // Check the top inventory too (shift-click from bottom)
-            if (e.getView().getTopInventory().getHolder() instanceof GUIHolder) {
-                e.setCancelled(true);
-            }
+        // Identify if the click happened in one of our GUIs by checking the
+        // top inventory's holder (not getClickedInventory — that's null for
+        // clicks outside any inventory, and may be the player's inventory
+        // for shift-clicks).
+        Inventory top = e.getView().getTopInventory();
+        if (top == null) return;
+        if (!(top.getHolder() instanceof GUIHolder gh)) return;
+
+        // Always cancel — our GUIs are read-only (no item movement allowed)
+        e.setCancelled(true);
+
+        // If user clicked the bottom (player) inventory while our GUI is open,
+        // ignore (we already cancelled the event to prevent shift-click exploits).
+        if (e.getClickedInventory() == null
+                || e.getClickedInventory().equals(e.getView().getBottomInventory())) {
             return;
         }
-
-        e.setCancelled(true); // always cancel inside our GUIs
 
         if (!(e.getWhoClicked() instanceof Player p)) return;
 
         int slot = e.getRawSlot();
-        GUIType type = gh.type();
+        // Make sure slot is within the top inventory (not player inventory)
+        if (slot >= top.getSize()) return;
 
+        GUIType type = gh.type();
         switch (type) {
             case MAIN -> handleMainClick(p, slot);
             case DELAY -> handleDelayClick(p, slot);
@@ -337,9 +349,30 @@ public class GUIManager implements Listener {
     }
 
     @EventHandler
+    public void onDrag(InventoryDragEvent e) {
+        // Cancel drags in our GUIs too
+        Inventory top = e.getView().getTopInventory();
+        if (top != null && top.getHolder() instanceof GUIHolder) {
+            e.setCancelled(true);
+        }
+    }
+
+    @EventHandler
     public void onClose(InventoryCloseEvent e) {
-        // Don't immediately remove the session — allow time for re-opening
-        // (sessions are cleaned up implicitly when player quits)
+        // Sessions are kept alive (so reopening is fast). They get cleaned
+        // implicitly on player quit via PlayerQuitEvent listener below.
+    }
+
+    @EventHandler
+    public void onQuit(org.bukkit.event.player.PlayerQuitEvent e) {
+        sessions.remove(e.getPlayer().getUniqueId());
+        // Also remove any pending chat-input listener for this player
+        ChatInputListener listener = activeChatListeners.remove(e.getPlayer().getUniqueId());
+        if (listener != null) {
+            try {
+                org.bukkit.event.HandlerList.unregisterAll(listener);
+            } catch (Throwable ignored) {}
+        }
     }
 
     // ── Main GUI click handler ────────────────────────────────────────────
@@ -348,10 +381,13 @@ public class GUIManager implements Listener {
         PluginConfig cfg = plugin.getPluginConfig();
         switch (slot) {
             case SLOT_STATUS -> {
+                // Status is read-only — just play a sound for feedback
+                p.playSound(p.getLocation(), org.bukkit.Sound.UI_BUTTON_CLICK, 0.5f, 1.0f);
                 p.sendMessage(ColorScheme.info("Click §eToggle §7below to change status."));
             }
-            case SLOT_DELAY -> openDelay(p);
+            case SLOT_DELAY -> { p.playSound(p.getLocation(), org.bukkit.Sound.UI_BUTTON_CLICK, 0.5f, 1.0f); openDelay(p); }
             case SLOT_MODE -> {
+                p.playSound(p.getLocation(), org.bukkit.Sound.UI_BUTTON_CLICK, 0.5f, 1.0f);
                 PluginConfig.AnnouncementMode newMode = (cfg.getMode() == PluginConfig.AnnouncementMode.ALL)
                         ? PluginConfig.AnnouncementMode.CUSTOM
                         : PluginConfig.AnnouncementMode.ALL;
@@ -363,8 +399,9 @@ public class GUIManager implements Listener {
                 }
                 openMain(p);
             }
-            case SLOT_PLAYERS -> openPlayerList(p);
+            case SLOT_PLAYERS -> { p.playSound(p.getLocation(), org.bukkit.Sound.UI_BUTTON_CLICK, 0.5f, 1.0f); openPlayerList(p); }
             case SLOT_OFFLINE -> {
+                p.playSound(p.getLocation(), org.bukkit.Sound.UI_BUTTON_CLICK, 0.5f, 1.0f);
                 PluginConfig.OfflineHandling newH = (cfg.getOfflineHandling() == PluginConfig.OfflineHandling.SHOW)
                         ? PluginConfig.OfflineHandling.SKIP
                         : PluginConfig.OfflineHandling.SHOW;
@@ -377,14 +414,20 @@ public class GUIManager implements Listener {
                 cfg.setEnabled(newState);
                 if (newState) {
                     plugin.getAnnouncementManager().start();
+                    p.playSound(p.getLocation(), org.bukkit.Sound.BLOCK_NOTE_BLOCK_PLING, 0.7f, 1.5f);
                     p.sendMessage(ColorScheme.success("Coordinate Announcer §aENABLED§f."));
                 } else {
                     plugin.getAnnouncementManager().stop();
+                    p.playSound(p.getLocation(), org.bukkit.Sound.BLOCK_NOTE_BLOCK_PLING, 0.7f, 0.5f);
                     p.sendMessage(ColorScheme.info("Coordinate Announcer §cDISABLED§f."));
                 }
                 openMain(p);
             }
-            case SLOT_CLOSE -> p.closeInventory();
+            case SLOT_CLOSE -> { p.playSound(p.getLocation(), org.bukkit.Sound.UI_BUTTON_CLICK, 0.5f, 1.0f); p.closeInventory(); }
+            default -> {
+                // Clicked a filler slot — play a soft "deny" sound
+                p.playSound(p.getLocation(), org.bukkit.Sound.BLOCK_NOTE_BLOCK_BASS, 0.3f, 0.8f);
+            }
         }
     }
 
@@ -401,31 +444,43 @@ public class GUIManager implements Listener {
             case SLOT_D_PLUS1   -> adjustDelay(p, currentValue + 1, currentUnit);
             case SLOT_D_PLUS10  -> adjustDelay(p, currentValue + 10, currentUnit);
             case SLOT_D_VALUE   -> {
-                // Switch to chat-input mode
+                // Switch to chat-input mode.
+                // First, unregister any previous chat-input listener for this player
+                // (prevents stacking if user clicks the value paper multiple times).
+                unregisterChatListener(p);
+
                 p.closeInventory();
                 p.sendMessage(ColorScheme.PRIMARY + "§lType the new delay value in chat:");
                 p.sendMessage("§7Type a number (e.g., §e60§7) or §ecancel§7 to abort.");
-                plugin.getServer().getPluginManager().registerEvents(
-                        new ChatInputListener(p, value -> {
-                            try {
-                                long v = Long.parseLong(value);
-                                if (v <= 0) {
-                                    p.sendMessage(ColorScheme.error("Value must be positive."));
-                                } else if (currentUnit.toSeconds(v) < 15) {
-                                    p.sendMessage(ColorScheme.error("Too short — minimum is §e15 " + currentUnit.shortName() + "§f (15s)."));
-                                } else {
-                                    cfg.setDelay(v, currentUnit);
-                                    p.sendMessage(ColorScheme.success("Delay value set to §e" + v + "§f."));
-                                    if (cfg.isEnabled()) {
-                                        plugin.getAnnouncementManager().restart();
-                                        p.sendMessage(ColorScheme.info("Announcement task restarted."));
-                                    }
-                                }
-                            } catch (NumberFormatException e) {
-                                p.sendMessage(ColorScheme.error("Invalid number: §e" + value));
-                            }
+                ChatInputListener listener = new ChatInputListener(p, value -> {
+                    try {
+                        // Handle "cancel"
+                        if (value.trim().equalsIgnoreCase("cancel")) {
+                            p.sendMessage(ColorScheme.info("Cancelled — delay unchanged."));
                             openDelay(p);
-                        }), plugin);
+                            return;
+                        }
+                        long v = Long.parseLong(value.trim());
+                        if (v <= 0) {
+                            p.sendMessage(ColorScheme.error("Value must be positive."));
+                        } else if (currentUnit.toSeconds(v) < 15) {
+                            p.sendMessage(ColorScheme.error("Too short — minimum is §e15 " + currentUnit.shortName() + "§f (15s)."));
+                        } else {
+                            cfg.setDelay(v, currentUnit);
+                            p.sendMessage(ColorScheme.success("Delay value set to §e" + v + "§f."));
+                            if (cfg.isEnabled()) {
+                                plugin.getAnnouncementManager().restart();
+                                p.sendMessage(ColorScheme.info("Announcement task restarted."));
+                            }
+                        }
+                    } catch (NumberFormatException ex) {
+                        p.sendMessage(ColorScheme.error("Invalid number: §e" + value
+                                + "§f. Type a number or §ecancel§f."));
+                    }
+                    openDelay(p);
+                });
+                activeChatListeners.put(p.getUniqueId(), listener);
+                plugin.getServer().getPluginManager().registerEvents(listener, plugin);
             }
             case SLOT_D_FORMAT -> {
                 DelayUnit next = currentUnit.next();
@@ -439,7 +494,8 @@ public class GUIManager implements Listener {
                 p.sendMessage(ColorScheme.success("Format changed to §e" + next.displayName() + "§f."));
                 openDelay(p);
             }
-            case SLOT_D_BACK -> openMain(p);
+            case SLOT_D_BACK -> { p.playSound(p.getLocation(), org.bukkit.Sound.UI_BUTTON_CLICK, 0.5f, 1.0f); openMain(p); }
+            default -> p.playSound(p.getLocation(), org.bukkit.Sound.BLOCK_NOTE_BLOCK_BASS, 0.3f, 0.8f);
         }
     }
 
@@ -488,7 +544,13 @@ public class GUIManager implements Listener {
                     p.playSound(p.getLocation(), org.bukkit.Sound.ENTITY_ITEM_PICKUP, 0.5f, 1.0f);
                     openPlayerList(p, session.playerListPage);
                 }
+            } else {
+                // Empty slot in player-head area
+                p.playSound(p.getLocation(), org.bukkit.Sound.BLOCK_NOTE_BLOCK_BASS, 0.3f, 0.8f);
             }
+        } else {
+            // Clicked a filler slot — play a soft "deny" sound
+            p.playSound(p.getLocation(), org.bukkit.Sound.BLOCK_NOTE_BLOCK_BASS, 0.3f, 0.8f);
         }
     }
 
@@ -535,6 +597,25 @@ public class GUIManager implements Listener {
         for (int i = 0; i < inv.getSize(); i++) {
             if (inv.getItem(i) == null) inv.setItem(i, filler);
         }
+    }
+
+    /**
+     * Unregister any active ChatInputListener for the given player (prevents leak).
+     */
+    private void unregisterChatListener(@NotNull Player p) {
+        ChatInputListener old = activeChatListeners.remove(p.getUniqueId());
+        if (old != null) {
+            try {
+                org.bukkit.event.HandlerList.unregisterAll(old);
+            } catch (Throwable ignored) {}
+        }
+    }
+
+    /**
+     * Called by ChatInputListener after it self-unregisters, to clear our tracking map.
+     */
+    public void clearActiveChatListener(@NotNull UUID uuid) {
+        activeChatListeners.remove(uuid);
     }
 
     // ── GUI Holder (used to identify our inventories) ─────────────────────

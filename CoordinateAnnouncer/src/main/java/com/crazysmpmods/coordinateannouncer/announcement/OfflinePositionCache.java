@@ -16,6 +16,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.locks.ReentrantLock;
@@ -29,8 +30,11 @@ import java.util.concurrent.locks.ReentrantLock;
  *   - On PlayerQuitEvent (final position before disconnect)
  *   - Throttled via PlayerMoveEvent (every N ms, configurable)
  *
- * Persistence: written to data.yml on every update (atomic temp-file+rename).
- * On startup: loaded back into memory.
+ * Persistence: written to data.yml via ASYNC task (Bukkit scheduler).
+ * Atomic save: temp file + atomic rename — no corruption on crash.
+ *
+ * Cache pruning: entries older than 30 days are auto-pruned on save
+ * to prevent unbounded growth.
  */
 public class OfflinePositionCache {
 
@@ -38,8 +42,14 @@ public class OfflinePositionCache {
     private final Path dataFile;
     private final ReentrantLock lock = new ReentrantLock();
 
-    // uuid -> [worldName, x, y, z, username]
+    // uuid -> cached position
     private final Map<UUID, CachedPosition> cache = new HashMap<>();
+
+    // Tracks whether a save is currently scheduled (prevents stacking async saves)
+    private volatile boolean savePending = false;
+
+    /** Max age in ms before a cached entry is pruned (30 days). */
+    private static final long MAX_AGE_MS = 30L * 24 * 60 * 60 * 1000;
 
     public OfflinePositionCache(@NotNull CoordinateAnnouncer plugin) {
         this.plugin = plugin;
@@ -57,6 +67,8 @@ public class OfflinePositionCache {
             ConfigurationSection root = yaml.getConfigurationSection("players");
             if (root == null) return;
 
+            long now = System.currentTimeMillis();
+            int pruned = 0;
             for (String uuidStr : root.getKeys(false)) {
                 try {
                     UUID uuid = UUID.fromString(uuidStr);
@@ -66,21 +78,56 @@ public class OfflinePositionCache {
                     int y = root.getInt(uuidStr + ".y", 64);
                     int z = root.getInt(uuidStr + ".z", 0);
                     long ts = root.getLong(uuidStr + ".timestamp", 0L);
+                    // Prune stale entries on load
+                    if ((now - ts) > MAX_AGE_MS) {
+                        pruned++;
+                        continue;
+                    }
                     cache.put(uuid, new CachedPosition(name, worldName, x, y, z, ts));
                 } catch (IllegalArgumentException ignored) {
                     // skip invalid UUIDs
                 }
             }
-            plugin.getLogger().info("Loaded " + cache.size() + " cached positions from data.yml");
+            plugin.getLogger().info("Loaded " + cache.size() + " cached positions from data.yml"
+                    + (pruned > 0 ? " (pruned " + pruned + " stale entries)" : ""));
         } finally {
             lock.unlock();
         }
     }
 
+    /**
+     * Schedule an async save. Multiple rapid calls coalesce into one save
+     * (the next save picks up the latest state).
+     */
     public void save() {
+        if (savePending) return; // already scheduled — will pick up latest state
+        savePending = true;
+        Bukkit.getScheduler().runTaskAsynchronously(plugin, this::doSave);
+    }
+
+    /**
+     * Synchronous save — only call from onDisable() or reload().
+     */
+    public void saveSync() {
+        savePending = false; // cancel any pending async save
+        doSave();
+    }
+
+    private void doSave() {
+        // Snapshot under lock, then do I/O outside lock
+        final YamlConfiguration yaml = new YamlConfiguration();
+        final int count;
         lock.lock();
         try {
-            YamlConfiguration yaml = new YamlConfiguration();
+            // Prune stale entries before saving
+            long now = System.currentTimeMillis();
+            Iterator<Map.Entry<UUID, CachedPosition>> it = cache.entrySet().iterator();
+            while (it.hasNext()) {
+                Map.Entry<UUID, CachedPosition> e = it.next();
+                if ((now - e.getValue().timestamp) > MAX_AGE_MS) {
+                    it.remove();
+                }
+            }
             for (Map.Entry<UUID, CachedPosition> e : cache.entrySet()) {
                 String key = "players." + e.getKey();
                 CachedPosition p = e.getValue();
@@ -91,7 +138,13 @@ public class OfflinePositionCache {
                 yaml.set(key + ".z", p.z);
                 yaml.set(key + ".timestamp", p.timestamp);
             }
+            count = cache.size();
+        } finally {
+            lock.unlock();
+        }
 
+        // File I/O (outside the lock — doesn't block readers)
+        try {
             Files.createDirectories(dataFile.getParent());
             Path tmp = dataFile.resolveSibling("data.yml.tmp");
             String data = yaml.saveToString();
@@ -100,12 +153,13 @@ public class OfflinePositionCache {
         } catch (IOException e) {
             plugin.getLogger().severe("Failed to save data.yml: " + e.getMessage());
         } finally {
-            lock.unlock();
+            savePending = false;
         }
     }
 
     /**
-     * Update the cached position for a player (called from PlayerMoveEvent/QuitEvent).
+     * Update the cached position for a player.
+     * Schedules an async save (does NOT block the main thread).
      */
     public void update(@NotNull UUID uuid, @NotNull String username, @NotNull Location loc) {
         lock.lock();
@@ -123,10 +177,7 @@ public class OfflinePositionCache {
         } finally {
             lock.unlock();
         }
-        // Persist asynchronously to avoid blocking the main thread on every move
-        // (Bukkit scheduler runs on main thread, but file I/O is fast enough to
-        // stay sync for our use case — typically <5ms)
-        save();
+        save(); // async — non-blocking
     }
 
     /**
@@ -139,11 +190,51 @@ public class OfflinePositionCache {
             CachedPosition cp = cache.get(uuid);
             if (cp == null) return null;
             World w = Bukkit.getWorld(cp.worldName);
-            if (w == null) return null;
+            if (w == null) {
+                // World was deleted/renamed — return a placeholder location in the
+                // default world so the announcement doesn't crash.
+                w = Bukkit.getWorlds().isEmpty() ? null : Bukkit.getWorlds().get(0);
+                if (w == null) return null;
+            }
             return new Location(w, cp.x + 0.5, cp.y, cp.z + 0.5);
         } finally {
             lock.unlock();
         }
+    }
+
+    /**
+     * Get the cached Dimension for an offline player, or null.
+     * Returns UNKNOWN if the world was deleted/unloaded.
+     */
+    @Nullable
+    public com.crazysmpmods.coordinateannouncer.model.Dimension getCachedDimension(@NotNull UUID uuid) {
+        lock.lock();
+        try {
+            CachedPosition cp = cache.get(uuid);
+            if (cp == null) return null;
+            World w = Bukkit.getWorld(cp.worldName);
+            // If world is null (deleted/unloaded), still return a dimension
+            // based on the world name convention.
+            if (w == null) {
+                return guessDimensionFromName(cp.worldName);
+            }
+            return com.crazysmpmods.coordinateannouncer.model.Dimension.fromWorld(w);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private com.crazysmpmods.coordinateannouncer.model.Dimension guessDimensionFromName(String name) {
+        if (name == null) return com.crazysmpmods.coordinateannouncer.model.Dimension.UNKNOWN;
+        String lower = name.toLowerCase();
+        if (lower.contains("nether")) return com.crazysmpmods.coordinateannouncer.model.Dimension.NETHER;
+        if (lower.contains("the_end") || lower.endsWith("_end") || lower.equals("end")) {
+            return com.crazysmpmods.coordinateannouncer.model.Dimension.THE_END;
+        }
+        if (lower.contains("world") || lower.equals("overworld")) {
+            return com.crazysmpmods.coordinateannouncer.model.Dimension.OVERWORLD;
+        }
+        return com.crazysmpmods.coordinateannouncer.model.Dimension.UNKNOWN;
     }
 
     @Nullable
@@ -153,7 +244,8 @@ public class OfflinePositionCache {
             CachedPosition cp = cache.get(uuid);
             return cp != null ? cp.username : null;
         } finally {
-            lock.unlock(); }
+            lock.unlock();
+        }
     }
 
     public boolean has(@NotNull UUID uuid) {
@@ -169,7 +261,14 @@ public class OfflinePositionCache {
     public void clear() {
         lock.lock();
         try { cache.clear(); } finally { lock.unlock(); }
-        save();
+        saveSync();
+    }
+
+    /**
+     * Force-save any pending changes (called from onDisable).
+     */
+    public void flush() {
+        saveSync();
     }
 
     // ── Inner record ──────────────────────────────────────────────────────
