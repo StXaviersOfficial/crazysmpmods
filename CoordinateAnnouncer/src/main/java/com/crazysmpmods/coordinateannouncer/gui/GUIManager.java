@@ -579,13 +579,23 @@ public class GUIManager implements Listener {
         ItemStack item = new ItemStack(Material.PLAYER_HEAD);
         SkullMeta meta = (SkullMeta) item.getItemMeta();
         if (meta != null) {
-            meta.setOwningPlayer(op);
-            meta.displayName(Component.text(name));
-            if (lore.length > 0) {
-                List<Component> loreList = new ArrayList<>();
-                for (String line : lore) loreList.add(Component.text(line));
-                meta.lore(loreList);
+            // For Bedrock players (Floodgate), setOwningPlayer may return a Steve head
+            // because they don't have a Mojang skin. That's fine — the head still
+            // displays correctly as a player head with the right name.
+            try {
+                meta.setOwningPlayer(op);
+            } catch (Throwable t) {
+                // Some Floodgate versions may throw here — ignore, head stays default
             }
+            meta.displayName(Component.text(name));
+            // Add a Bedrock indicator to the lore if applicable
+            List<Component> loreList = new ArrayList<>();
+            boolean isBedrock = com.crazysmpmods.coordinateannouncer.util.BedrockDetector.isBedrockPlayer(op.getUniqueId());
+            if (isBedrock) {
+                loreList.add(Component.text("§7§oBedrock player (Geyser)"));
+            }
+            for (String line : lore) loreList.add(Component.text(line));
+            meta.lore(loreList);
             meta.addItemFlags(ItemFlag.values());
             item.setItemMeta(meta);
         }

@@ -33,12 +33,12 @@ mode: ALL
 offline-handling: SHOW
 
 # The list of custom players (used when mode=CUSTOM).
-# Stored as a list of {uuid, name, last_known_position} entries.
+# Stored as a list of {uuid, name} entries.
 # Edits via /ca player add|remove — DO NOT edit manually unless you know the UUIDs.
 custom-players: []
 
 # =============================================================
-#  ADVANCED (do not change unless you know what you're doing)
+#  ADVANCED (do not change unless you know what you are doing)
 # =============================================================
 
 # Throttle for PlayerMoveEvent position cache updates (in milliseconds).
@@ -53,3 +53,18 @@ filter-npcs: true
 # players who will receive the announcement (false — useful for custom mode
 # where the list is small).
 countdown-global: true
+
+# First-fire delay: time (in seconds) before the FIRST announcement after
+# plugin enable. Set to -1 to use the regular delay. Set to e.g. 30 for
+# a quick first announcement 30s after enable, then regular intervals after.
+# Minimum: 15 (countdown needs 11s + 4s buffer).
+first-fire-delay-seconds: -1
+
+# Whether to also print announcements + countdowns to the server console.
+# Set to false to silence console spam (players still see them in chat).
+announce-to-console: true
+
+# Custom prefix prepended to each announcement line (after the header).
+# E.g., set to "[Tracker] " to get "[Tracker] QuackPlayzYT → 20 28 -483 (Overworld)".
+# Leave empty for no prefix. Supports §-color codes.
+message-prefix: ""

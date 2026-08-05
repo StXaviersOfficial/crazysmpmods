@@ -3,7 +3,6 @@ package com.crazysmpmods.coordinateannouncer.config;
 import com.crazysmpmods.coordinateannouncer.CoordinateAnnouncer;
 import com.crazysmpmods.coordinateannouncer.model.CustomPlayer;
 import com.crazysmpmods.coordinateannouncer.model.DelayUnit;
-import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.jetbrains.annotations.NotNull;
@@ -15,7 +14,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -24,6 +25,12 @@ import java.util.concurrent.locks.ReentrantLock;
  *
  * All mutations go through {@link #save()} which writes to a temp file
  * then atomically renames — no corruption possible from a mid-write crash.
+ *
+ * COMMENT PRESERVATION: Unlike the default YamlConfiguration.save() which
+ * strips all comments, this class writes a hand-crafted YAML string with
+ * inline comments matching the default config.yml. This means user-edited
+ * comments ARE replaced with our canonical comments on save, but at least
+ * the file remains readable and documented.
  *
  * Mutators also bump an in-memory dirty flag; if the server crashes BEFORE
  * the next save() call, those changes are lost (acceptable for non-critical
@@ -47,6 +54,11 @@ public class PluginConfig {
     private long positionCacheThrottleMs = 5000L;
     private boolean filterNpcs = true;
     private boolean countdownGlobal = true;
+
+    // NEW (v1.1.0)
+    private long firstFireDelaySeconds = -1L; // -1 = use regular delay
+    private boolean announceToConsole = true;
+    private String messagePrefix = ""; // prepended to each announcement line
 
     public PluginConfig(@NotNull CoordinateAnnouncer plugin) {
         this.plugin = plugin;
@@ -73,7 +85,7 @@ public class PluginConfig {
             List<?> rawList = cfg.getList("custom-players");
             if (rawList != null) {
                 for (Object o : rawList) {
-                    if (o instanceof java.util.Map<?, ?> m) {
+                    if (o instanceof Map<?, ?> m) {
                         try {
                             String uuidStr = String.valueOf(m.get("uuid"));
                             String name = String.valueOf(m.get("name"));
@@ -90,6 +102,9 @@ public class PluginConfig {
             this.positionCacheThrottleMs = cfg.getLong("position-cache-throttle-ms", 5000L);
             this.filterNpcs              = cfg.getBoolean("filter-npcs", true);
             this.countdownGlobal         = cfg.getBoolean("countdown-global", true);
+            this.firstFireDelaySeconds   = cfg.getLong("first-fire-delay-seconds", -1L);
+            this.announceToConsole       = cfg.getBoolean("announce-to-console", true);
+            this.messagePrefix           = cfg.getString("message-prefix", "");
 
             // Validate
             if (delayValue <= 0) {
@@ -111,34 +126,96 @@ public class PluginConfig {
         }
     }
 
+    /**
+     * Save config to disk with inline comments (preserves readability).
+     * Atomic: writes to temp file then renames.
+     */
     public void save() {
         lock.lock();
         try {
-            YamlConfiguration cfg = new YamlConfiguration();
-            cfg.set("enabled", enabled);
-            cfg.set("delay.value", delayValue);
-            cfg.set("delay.unit", delayUnit.name());
-            cfg.set("mode", mode.name());
-            cfg.set("offline-handling", offlineHandling.name());
+            // Build YAML manually with comments
+            StringBuilder sb = new StringBuilder();
+            sb.append("# =============================================================\n");
+            sb.append("#                  COORDINATE ANNOUNCER\n");
+            sb.append("#         CrazySMP Mods — by QuackPlayzYT\n");
+            sb.append("# =============================================================\n");
+            sb.append("#\n");
+            sb.append("#  All settings below can also be changed in-game via /ca gui\n");
+            sb.append("#  (chest GUI). Changes made in GUI are saved here automatically.\n");
+            sb.append("#  Manual edits to this file require /ca reload.\n");
+            sb.append("# =============================================================\n\n");
 
-            // Custom players (serialized as list of maps)
-            List<java.util.Map<String, Object>> playerMaps = new ArrayList<>();
-            for (CustomPlayer cp : customPlayers) {
-                java.util.Map<String, Object> m = new java.util.LinkedHashMap<>();
-                m.put("uuid", cp.uuid().toString());
-                m.put("name", cp.name());
-                playerMaps.add(m);
+            sb.append("# Whether announcements are currently enabled.\n");
+            sb.append("# Set to false on first install — operator must explicitly /ca toggle.\n");
+            sb.append("enabled: ").append(enabled).append("\n\n");
+
+            sb.append("# Delay between announcements.\n");
+            sb.append("# Format: <integer> <unit>  where unit ∈ {seconds, minutes, hours, days}\n");
+            sb.append("# Minimum: 15 seconds (the 10s + 5s countdown needs at least 11s, +4s buffer).\n");
+            sb.append("delay:\n");
+            sb.append("  value: ").append(delayValue).append("\n");
+            sb.append("  unit: ").append(delayUnit.name()).append("\n\n");
+
+            sb.append("# Which players to announce.\n");
+            sb.append("#   ALL    = every currently-online player\n");
+            sb.append("#   CUSTOM = only players added via /ca player add <name>\n");
+            sb.append("mode: ").append(mode.name()).append("\n\n");
+
+            sb.append("# How to handle players on the custom list who are offline at announcement time.\n");
+            sb.append("#   SHOW = display \"[OFFLINE] <name> → Last known: X Y Z (dim)\" using cached position\n");
+            sb.append("#   SKIP = silently omit them from the announcement\n");
+            sb.append("offline-handling: ").append(offlineHandling.name()).append("\n\n");
+
+            sb.append("# The list of custom players (used when mode=CUSTOM).\n");
+            sb.append("# Edits via /ca player add|remove — DO NOT edit manually unless you know the UUIDs.\n");
+            sb.append("custom-players:\n");
+            if (customPlayers.isEmpty()) {
+                sb.append("  []\n\n");
+            } else {
+                for (CustomPlayer cp : customPlayers) {
+                    sb.append("  - uuid: \"").append(cp.uuid()).append("\"\n");
+                    sb.append("    name: \"").append(cp.name()).append("\"\n");
+                }
+                sb.append("\n");
             }
-            cfg.set("custom-players", playerMaps);
 
-            cfg.set("position-cache-throttle-ms", positionCacheThrottleMs);
-            cfg.set("filter-npcs", filterNpcs);
-            cfg.set("countdown-global", countdownGlobal);
+            sb.append("# =============================================================\n");
+            sb.append("#  ADVANCED (do not change unless you know what you are doing)\n");
+            sb.append("# =============================================================\n\n");
+
+            sb.append("# Throttle for PlayerMoveEvent position cache updates (in milliseconds).\n");
+            sb.append("# Lower = more accurate last-known coords but more CPU. 5000ms = 5s.\n");
+            sb.append("position-cache-throttle-ms: ").append(positionCacheThrottleMs).append("\n\n");
+
+            sb.append("# Whether to filter out non-player \"fake players\" (Citizens NPCs, Carpet mod\n");
+            sb.append("# fake players, etc.) from announcements.\n");
+            sb.append("filter-npcs: ").append(filterNpcs).append("\n\n");
+
+            sb.append("# Whether the countdown messages should be sent globally (true) or only to\n");
+            sb.append("# players who will receive the announcement (false — useful for custom mode\n");
+            sb.append("# where the list is small).\n");
+            sb.append("countdown-global: ").append(countdownGlobal).append("\n\n");
+
+            sb.append("# First-fire delay: time (in seconds) before the FIRST announcement after\n");
+            sb.append("# plugin enable. Set to -1 to use the regular delay. Set to e.g. 30 for\n");
+            sb.append("# a quick first announcement 30s after enable, then regular intervals after.\n");
+            sb.append("# Minimum: 15 (countdown needs 11s + 4s buffer).\n");
+            sb.append("first-fire-delay-seconds: ").append(firstFireDelaySeconds).append("\n\n");
+
+            sb.append("# Whether to also print announcements + countdowns to the server console.\n");
+            sb.append("# Set to false to silence console spam (players still see them in chat).\n");
+            sb.append("announce-to-console: ").append(announceToConsole).append("\n\n");
+
+            sb.append("# Custom prefix prepended to each announcement line (after the header).\n");
+            sb.append("# E.g., set to \"[Tracker] \" to get \"[Tracker] QuackPlayzYT → 20 28 -483 (Overworld)\".\n");
+            sb.append("# Leave empty for no prefix. Supports §-color codes.\n");
+            sb.append("message-prefix: \"").append(messagePrefix.replace("\"", "\\\"")).append("\"\n");
+
+            String data = sb.toString();
 
             // Atomic save: write to temp file then rename
             Files.createDirectories(configFile.getParent());
             Path tmp = configFile.resolveSibling("config.yml.tmp");
-            String data = cfg.saveToString();
             Files.write(tmp, data.getBytes(StandardCharsets.UTF_8));
             Files.move(tmp, configFile, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
         } catch (IOException e) {
@@ -160,6 +237,9 @@ public class PluginConfig {
             this.positionCacheThrottleMs = 5000L;
             this.filterNpcs = true;
             this.countdownGlobal = true;
+            this.firstFireDelaySeconds = -1L;
+            this.announceToConsole = true;
+            this.messagePrefix = "";
         } finally {
             lock.unlock();
         }
@@ -283,6 +363,40 @@ public class PluginConfig {
     public boolean isCountdownGlobal() {
         lock.lock();
         try { return countdownGlobal; } finally { lock.unlock(); }
+    }
+
+    public long getFirstFireDelaySeconds() {
+        lock.lock();
+        try { return firstFireDelaySeconds; } finally { lock.unlock(); }
+    }
+
+    public void setFirstFireDelaySeconds(long seconds) {
+        lock.lock();
+        try { this.firstFireDelaySeconds = seconds; } finally { lock.unlock(); }
+        save();
+    }
+
+    public boolean isAnnounceToConsole() {
+        lock.lock();
+        try { return announceToConsole; } finally { lock.unlock(); }
+    }
+
+    public void setAnnounceToConsole(boolean b) {
+        lock.lock();
+        try { this.announceToConsole = b; } finally { lock.unlock(); }
+        save();
+    }
+
+    @NotNull
+    public String getMessagePrefix() {
+        lock.lock();
+        try { return messagePrefix; } finally { lock.unlock(); }
+    }
+
+    public void setMessagePrefix(@NotNull String prefix) {
+        lock.lock();
+        try { this.messagePrefix = prefix; } finally { lock.unlock(); }
+        save();
     }
 
     // ── Enums ─────────────────────────────────────────────────────────────

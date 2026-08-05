@@ -71,6 +71,10 @@ public class CACommand implements CommandExecutor, TabCompleter {
             case "now"    -> handleNow(sender);
             case "info", "status" -> handleInfo(sender);
             case "purge"  -> handlePurge(sender);
+            case "version", "ver" -> handleVersion(sender);
+            case "prefix" -> handlePrefix(sender, args);
+            case "console"-> handleConsole(sender, args);
+            case "firstfire" -> handleFirstFire(sender, args);
             case "reload" -> handleReload(sender);
             case "help"   -> sendHelp(sender, label);
             default -> {
@@ -217,12 +221,30 @@ public class CACommand implements CommandExecutor, TabCompleter {
                     sender.sendMessage(ColorScheme.info("Custom player list is empty."));
                     return;
                 }
-                sender.sendMessage(ColorScheme.PRIMARY + "§lCustom Players §7(" + list.size() + "):");
-                for (CustomPlayer cp : list) {
+                // Paginated output: 8 players per page
+                int page = 1;
+                if (args.length >= 3) {
+                    try { page = Integer.parseInt(args[2]); } catch (NumberFormatException ignored) {}
+                }
+                int perPage = 8;
+                int totalPages = (int) Math.ceil((double) list.size() / perPage);
+                if (page < 1) page = 1;
+                if (page > totalPages) page = totalPages;
+                int start = (page - 1) * perPage;
+                int end = Math.min(start + perPage, list.size());
+
+                sender.sendMessage(ColorScheme.DIVIDER);
+                sender.sendMessage(ColorScheme.PRIMARY + "§lCustom Players §7(Page " + page + "/" + totalPages + ", " + list.size() + " total):");
+                for (int i = start; i < end; i++) {
+                    CustomPlayer cp = list.get(i);
                     Player online = Bukkit.getPlayer(cp.uuid());
                     String status = (online != null && online.isOnline()) ? "§a[ONLINE]" : "§c[OFFLINE]";
                     sender.sendMessage("§e" + cp.name() + " §7" + status + " §8" + cp.uuid());
                 }
+                if (totalPages > 1) {
+                    sender.sendMessage("§7Page " + page + "/" + totalPages + " — use §e/ca player list <page> §7to navigate.");
+                }
+                sender.sendMessage(ColorScheme.DIVIDER);
             }
             case "clear" -> {
                 int n = plugin.getPluginConfig().getCustomPlayers().size();
@@ -292,6 +314,83 @@ public class CACommand implements CommandExecutor, TabCompleter {
         sender.sendMessage(ColorScheme.success("Purged §e" + n + "§f cached positions from data.yml."));
     }
 
+    private void handleVersion(@NotNull CommandSender sender) {
+        sender.sendMessage(ColorScheme.DIVIDER);
+        sender.sendMessage(ColorScheme.PRIMARY + "§lCoordinateAnnouncer §fv" + plugin.getPluginMeta().getVersion());
+        sender.sendMessage(ColorScheme.DIVIDER);
+        sender.sendMessage("§7API: §e" + plugin.getPluginMeta().getAPIVersion());
+        sender.sendMessage("§7Authors: §e" + String.join(", ", plugin.getPluginMeta().getAuthors()));
+        sender.sendMessage("§7Website: §e" + plugin.getPluginMeta().getWebsite());
+        sender.sendMessage("§7Java: §e" + System.getProperty("java.version"));
+        sender.sendMessage("§7Server: §e" + Bukkit.getVersion());
+        sender.sendMessage("§7Bedrock support: §e" +
+                (com.crazysmpmods.coordinateannouncer.util.BedrockDetector.isFloodgateAvailable()
+                        ? "§aFloodgate detected"
+                        : "§7Floodgate not installed (Java-only)"));
+        sender.sendMessage(ColorScheme.DIVIDER);
+    }
+
+    private void handlePrefix(@NotNull CommandSender sender, @NotNull String[] args) {
+        if (args.length < 2) {
+            String current = plugin.getPluginConfig().getMessagePrefix();
+            sender.sendMessage(ColorScheme.info("Current prefix: §r" + (current.isEmpty() ? "§8(empty)" : current)));
+            sender.sendMessage("§7Usage: §e/ca prefix <text> §7or §e/ca prefix clear");
+            return;
+        }
+        if (args[1].equalsIgnoreCase("clear") || args[1].equalsIgnoreCase("none") || args[1].equalsIgnoreCase("off")) {
+            plugin.getPluginConfig().setMessagePrefix("");
+            sender.sendMessage(ColorScheme.success("Message prefix cleared."));
+            return;
+        }
+        // Join all args after "prefix" as the prefix text (supports spaces)
+        StringBuilder sb = new StringBuilder();
+        for (int i = 1; i < args.length; i++) {
+            if (i > 1) sb.append(" ");
+            sb.append(args[i]);
+        }
+        plugin.getPluginConfig().setMessagePrefix(sb.toString());
+        sender.sendMessage(ColorScheme.success("Message prefix set to: §r" + sb));
+    }
+
+    private void handleConsole(@NotNull CommandSender sender, @NotNull String[] args) {
+        if (args.length < 2) {
+            sender.sendMessage(ColorScheme.info("Console logging: §e" +
+                    (plugin.getPluginConfig().isAnnounceToConsole() ? "ON" : "OFF")));
+            sender.sendMessage("§7Usage: §e/ca console <on|off>");
+            return;
+        }
+        boolean on = args[1].equalsIgnoreCase("on") || args[1].equalsIgnoreCase("true");
+        plugin.getPluginConfig().setAnnounceToConsole(on);
+        sender.sendMessage(ColorScheme.success("Console logging: §e" + (on ? "ON" : "OFF")));
+    }
+
+    private void handleFirstFire(@NotNull CommandSender sender, @NotNull String[] args) {
+        if (args.length < 2) {
+            long current = plugin.getPluginConfig().getFirstFireDelaySeconds();
+            sender.sendMessage(ColorScheme.info("First-fire delay: §e" +
+                    (current < 0 ? "same as regular delay" : current + " seconds")));
+            sender.sendMessage("§7Usage: §e/ca firstfire <seconds> §7or §e/ca firstfire default");
+            return;
+        }
+        if (args[1].equalsIgnoreCase("default") || args[1].equalsIgnoreCase("reset")) {
+            plugin.getPluginConfig().setFirstFireDelaySeconds(-1L);
+            sender.sendMessage(ColorScheme.success("First-fire delay reset to regular delay."));
+            return;
+        }
+        try {
+            long seconds = Long.parseLong(args[1]);
+            if (seconds < 15 && seconds >= 0) {
+                sender.sendMessage(ColorScheme.error("Minimum first-fire delay is §e15s§f (countdown needs 11s)."));
+                return;
+            }
+            plugin.getPluginConfig().setFirstFireDelaySeconds(seconds);
+            sender.sendMessage(ColorScheme.success("First-fire delay set to §e" + seconds + "s§f."));
+            sender.sendMessage("§7Use §e/ca toggle §7off then on to apply (or restart server).");
+        } catch (NumberFormatException e) {
+            sender.sendMessage(ColorScheme.error("Invalid number: §e" + args[1]));
+        }
+    }
+
     private void handleInfo(@NotNull CommandSender sender) {
         PluginConfig cfg = plugin.getPluginConfig();
         sender.sendMessage(ColorScheme.DIVIDER);
@@ -300,14 +399,23 @@ public class CACommand implements CommandExecutor, TabCompleter {
         sender.sendMessage("§7Status:        " + (cfg.isEnabled() ? "§aENABLED" : "§cDISABLED"));
         sender.sendMessage("§7Delay:         §e" + cfg.getDelayValue() + " " + cfg.getDelayUnit().displayName()
                 + " §7(" + cfg.getDelaySeconds() + "s)");
+        long ff = cfg.getFirstFireDelaySeconds();
+        sender.sendMessage("§7First-fire:    §e" + (ff < 0 ? "same as delay" : ff + "s"));
         sender.sendMessage("§7Mode:          §e" + cfg.getMode());
         sender.sendMessage("§7Offline:       §e" + cfg.getOfflineHandling());
         sender.sendMessage("§7Custom players:§e " + cfg.getCustomPlayers().size());
         sender.sendMessage("§7Cache size:    §e" + plugin.getOfflinePositionCache().size() + " §7players");
         sender.sendMessage("§7NPC filter:    §e" + (cfg.isFilterNpcs() ? "ON" : "OFF"));
         sender.sendMessage("§7Countdown:     §e" + (cfg.isCountdownGlobal() ? "GLOBAL" : "RECIPIENTS ONLY"));
+        sender.sendMessage("§7Console log:   §e" + (cfg.isAnnounceToConsole() ? "ON" : "OFF"));
+        String prefix = cfg.getMessagePrefix();
+        sender.sendMessage("§7Prefix:        §r" + (prefix.isEmpty() ? "§8(empty)" : prefix));
         sender.sendMessage("§7Task running:  §e" + (plugin.getAnnouncementManager().isRunning() ? "YES" : "NO"));
         sender.sendMessage("§7Countdown now: §e" + (plugin.getAnnouncementManager().isCountdownActive() ? "YES" : "NO"));
+        sender.sendMessage("§7Bedrock:       §e" +
+                (com.crazysmpmods.coordinateannouncer.util.BedrockDetector.isFloodgateAvailable()
+                        ? "§aFloodgate detected"
+                        : "§7Java-only"));
         sender.sendMessage(ColorScheme.DIVIDER);
     }
 
@@ -338,7 +446,7 @@ public class CACommand implements CommandExecutor, TabCompleter {
         sender.sendMessage("§e/" + label + " delay <value> <unit> §7- Set delay (units: seconds, minutes, hours, days)");
         sender.sendMessage("§e/" + label + " player add <name> §7- Add player to custom list");
         sender.sendMessage("§e/" + label + " player remove <name|uuid> §7- Remove player from custom list");
-        sender.sendMessage("§e/" + label + " player list §7- List custom players");
+        sender.sendMessage("§e/" + label + " player list [page] §7- List custom players (paginated)");
         sender.sendMessage("§e/" + label + " player clear §7- Clear custom player list");
         sender.sendMessage("§e/" + label + " mode all §7- Announce ALL online players");
         sender.sendMessage("§e/" + label + " mode custom §7- Announce ONLY custom-listed players");
@@ -346,22 +454,32 @@ public class CACommand implements CommandExecutor, TabCompleter {
         sender.sendMessage("§e/" + label + " offline skip §7- Skip offline players silently");
         sender.sendMessage("§e/" + label + " test §7- Fire one announcement WITH 10s countdown");
         sender.sendMessage("§e/" + label + " now §7- Fire one announcement immediately (no countdown)");
+        sender.sendMessage("§e/" + label + " firstfire <seconds|default> §7- Set first-fire delay (default: regular delay)");
+        sender.sendMessage("§e/" + label + " prefix <text|clear> §7- Set custom prefix for announcement lines");
+        sender.sendMessage("§e/" + label + " console <on|off> §7- Toggle console logging");
         sender.sendMessage("§e/" + label + " status §7- Show current settings (alias: info)");
+        sender.sendMessage("§e/" + label + " version §7- Show plugin version + Bedrock support info");
         sender.sendMessage("§e/" + label + " purge §7- Clear all cached positions from data.yml");
         sender.sendMessage("§e/" + label + " reload §7- Reload config from disk");
         sender.sendMessage("§e/" + label + " help §7- Show this help");
         sender.sendMessage(ColorScheme.DIVIDER);
+        sender.sendMessage("§7§oBedrock players (Geyser+Floodgate) are fully supported.");
+        sender.sendMessage("§7§oViaVersion/ViaBackwards players work without changes.");
     }
 
     // ── Tab completion ───────────────────────────────────────────────────
 
     private static final List<String> SUBS = Arrays.asList(
             "toggle", "gui", "delay", "player", "mode", "offline",
-            "test", "now", "info", "status", "purge", "reload", "help");
+            "test", "now", "info", "status", "purge", "version",
+            "prefix", "console", "firstfire", "reload", "help");
     private static final List<String> PLAYER_SUBS = Arrays.asList(
             "add", "remove", "list", "clear");
     private static final List<String> MODE_SUBS = Arrays.asList("all", "custom");
     private static final List<String> OFFLINE_SUBS = Arrays.asList("show", "skip");
+    private static final List<String> ON_OFF_SUBS = Arrays.asList("on", "off");
+    private static final List<String> FIRSTFIRE_SUBS = Arrays.asList("default", "reset", "15", "30", "60", "300", "600");
+    private static final List<String> PREFIX_SUBS = Arrays.asList("clear", "none", "off");
     private static final List<String> UNITS = Arrays.asList(
             "seconds", "minutes", "hours", "days", "s", "m", "h", "d");
 
@@ -376,6 +494,9 @@ public class CACommand implements CommandExecutor, TabCompleter {
                 case "player"  -> { return filter(PLAYER_SUBS, args[1]); }
                 case "mode"    -> { return filter(MODE_SUBS, args[1]); }
                 case "offline" -> { return filter(OFFLINE_SUBS, args[1]); }
+                case "console" -> { return filter(ON_OFF_SUBS, args[1]); }
+                case "firstfire" -> { return filter(FIRSTFIRE_SUBS, args[1]); }
+                case "prefix"  -> { return filter(PREFIX_SUBS, args[1]); }
             }
         }
         if (args.length == 3) {
@@ -383,7 +504,7 @@ public class CACommand implements CommandExecutor, TabCompleter {
                 case "delay" -> { return filter(UNITS, args[2]); }
                 case "player" -> {
                     if (args[1].equalsIgnoreCase("add") || args[1].equalsIgnoreCase("remove")) {
-                        // Suggest online players
+                        // Suggest online players (includes Bedrock players with prefix)
                         List<String> names = new ArrayList<>();
                         for (Player p : Bukkit.getOnlinePlayers()) {
                             if (p.getName() != null) names.add(p.getName());
@@ -395,6 +516,14 @@ public class CACommand implements CommandExecutor, TabCompleter {
                             }
                         }
                         return filter(names, args[2]);
+                    }
+                    if (args[1].equalsIgnoreCase("list")) {
+                        // Page numbers
+                        int total = plugin.getPluginConfig().getCustomPlayers().size();
+                        int pages = (int) Math.ceil((double) total / 8);
+                        List<String> pagesList = new ArrayList<>();
+                        for (int i = 1; i <= pages; i++) pagesList.add(String.valueOf(i));
+                        return filter(pagesList, args[2]);
                     }
                 }
             }

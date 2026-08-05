@@ -3,8 +3,16 @@ version: '${version}'
 main: com.crazysmpmods.coordinateannouncer.CoordinateAnnouncer
 api-version: '1.21.11'
 authors: [QuackPlayzYT, CrazySMPMods]
-description: Periodically announces player coordinates in chat with a 10-second countdown. Highly customizable via chest GUI.
+description: Periodically announces player coordinates in chat with a 10-second countdown. Highly customizable via chest GUI. Full Geyser/ViaVersion/ViaBackwards support.
 website: https://github.com/StXaviersOfficial/crazysmpmods
+
+# Soft-depend on Floodgate (Geyser's companion) so we load AFTER it.
+# This ensures BedrockDetector.canDetect() returns true once we're enabled.
+softdepend:
+  - floodgate
+  - GeyserMC
+  - Citizens
+  - Shopkeepers
 
 commands:
   coordinateannouncer:
@@ -16,7 +24,7 @@ commands:
       §e/ca delay <value> <unit> §7- Set delay (units: seconds, minutes, hours, days)
       §e/ca player add <name> §7- Add player to custom list
       §e/ca player remove <name|uuid> §7- Remove player from custom list
-      §e/ca player list §7- List custom players
+      §e/ca player list [page] §7- List custom players (paginated)
       §e/ca player clear §7- Clear custom player list
       §e/ca mode all §7- Announce ALL online players
       §e/ca mode custom §7- Announce ONLY custom-listed players
@@ -24,7 +32,11 @@ commands:
       §e/ca offline skip §7- Skip offline players silently
       §e/ca test §7- Fire one announcement WITH 10s countdown
       §e/ca now §7- Fire one announcement immediately (no countdown)
+      §e/ca firstfire <seconds|default> §7- Set first-fire delay
+      §e/ca prefix <text|clear> §7- Set custom prefix for announcement lines
+      §e/ca console <on|off> §7- Toggle console logging
       §e/ca status §7- Show current settings (alias: info)
+      §e/ca version §7- Show plugin version + Bedrock support info
       §e/ca purge §7- Clear all cached positions from data.yml
       §e/ca reload §7- Reload config from disk
       §e/ca help §7- Show this help

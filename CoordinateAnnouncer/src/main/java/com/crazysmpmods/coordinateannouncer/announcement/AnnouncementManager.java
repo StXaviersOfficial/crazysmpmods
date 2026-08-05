@@ -3,17 +3,19 @@ package com.crazysmpmods.coordinateannouncer.announcement;
 import com.crazysmpmods.coordinateannouncer.CoordinateAnnouncer;
 import com.crazysmpmods.coordinateannouncer.config.PluginConfig;
 import com.crazysmpmods.coordinateannouncer.model.CustomPlayer;
+import com.crazysmpmods.coordinateannouncer.model.Dimension;
 import com.crazysmpmods.coordinateannouncer.model.PlayerCoordinate;
 import com.crazysmpmods.coordinateannouncer.util.ColorScheme;
 import com.crazysmpmods.coordinateannouncer.util.NpcFilter;
+import net.kyori.adventure.text.Component;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
+import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
 import org.jetbrains.annotations.NotNull;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.UUID;
 
 /**
  * Manages the periodic announcement task and the 10-second countdown.
@@ -29,17 +31,23 @@ import java.util.UUID;
  *      full announcement. Snapshotting at T-0 (not at countdown start)
  *      ensures coords are accurate AS OF the announcement moment.
  *
+ * Bedrock/Geyser compatibility: All messages use Adventure Components which
+ * Geyser translates to Bedrock format codes. Works for both Java and Bedrock.
+ *
  * Bug-prevention:
  *   - Only one countdown runs at a time (tracked via countdownTaskId)
  *   - Empty custom list + CUSTOM mode → cancel with warning, no spam
  *   - NPC filtering (skip fake players)
  *   - Offline handling: SHOW vs SKIP per config
+ *   - Hard max-iteration guard on countdown (prevents infinite loop)
+ *   - Console logging is configurable (announce-to-console option)
  */
 public class AnnouncementManager {
 
     private final CoordinateAnnouncer plugin;
     private Integer mainTaskId = null;
     private Integer countdownTaskId = null;
+    private boolean isFirstFire = true;
 
     public AnnouncementManager(@NotNull CoordinateAnnouncer plugin) {
         this.plugin = plugin;
@@ -47,18 +55,40 @@ public class AnnouncementManager {
 
     /**
      * Start the periodic announcement task with the current delay.
+     * The first fire uses firstFireDelaySeconds (if set) or the regular delay.
      */
     public void start() {
         stop(); // always cancel any existing task first
+        isFirstFire = true;
 
-        long delayTicks = plugin.getPluginConfig().getDelayUnit().toTicks(
-                plugin.getPluginConfig().getDelayValue());
+        PluginConfig cfg = plugin.getPluginConfig();
+        long regularDelayTicks = cfg.getDelayUnit().toTicks(cfg.getDelayValue());
 
-        plugin.getLogger().info("Starting announcement task: delay=" + delayTicks + " ticks ("
-                + (delayTicks / 20) + "s)");
+        // Determine first-fire delay
+        long firstFireSeconds = cfg.getFirstFireDelaySeconds();
+        long firstFireTicks;
+        if (firstFireSeconds < 0) {
+            firstFireTicks = regularDelayTicks; // use regular delay
+        } else {
+            // Clamp to minimum 15s
+            long clamped = Math.max(15, firstFireSeconds);
+            firstFireTicks = clamped * 20L;
+        }
 
-        mainTaskId = Bukkit.getScheduler().runTaskTimer(plugin, this::onMainFire,
-                delayTicks, delayTicks).getTaskId();
+        plugin.getLogger().info("Starting announcement task: first-fire in "
+                + (firstFireTicks / 20) + "s, then every "
+                + (regularDelayTicks / 20) + "s");
+
+        // We use a single repeating task at the REGULAR delay, but we
+        // schedule the FIRST fire separately at firstFireTicks.
+        // After the first fire, we reschedule at the regular delay.
+        mainTaskId = Bukkit.getScheduler().runTaskLater(plugin, () -> {
+            isFirstFire = false;
+            onMainFire();
+            // Now schedule the repeating task at regular delay
+            mainTaskId = Bukkit.getScheduler().runTaskTimer(plugin, this::onMainFire,
+                    regularDelayTicks, regularDelayTicks).getTaskId();
+        }, firstFireTicks).getTaskId();
     }
 
     /**
@@ -111,8 +141,8 @@ public class AnnouncementManager {
     private void onMainFire() {
         PluginConfig cfg = plugin.getPluginConfig();
 
-        // Edge case: if countdown is already running (shouldn't be, since the
-        // main task fires every full delay and countdown is only 11s), cancel it.
+        // Edge case: if countdown is already running, cancel it (shouldn't happen
+        // since the main task fires every full delay and countdown is only 11s)
         if (countdownTaskId != null) {
             Bukkit.getScheduler().cancelTask(countdownTaskId);
             countdownTaskId = null;
@@ -121,9 +151,9 @@ public class AnnouncementManager {
         // Edge case: empty custom list + CUSTOM mode → no point in countdown
         if (cfg.getMode() == PluginConfig.AnnouncementMode.CUSTOM
                 && cfg.getCustomPlayers().isEmpty()) {
-            Bukkit.broadcast(ColorScheme.warn(
+            broadcast(ColorScheme.warn(
                     "§e⚠ §cAnnouncement skipped: CUSTOM mode is selected but no players are added."));
-            Bukkit.broadcast(ColorScheme.warn(
+            broadcast(ColorScheme.warn(
                     "§7Use §e/ca player add <name> §7to add players, or §e/ca mode all §7to switch."));
             return;
         }
@@ -142,23 +172,24 @@ public class AnnouncementManager {
         List<PlayerCoordinate> coords = collectCoordinates();
 
         if (coords.isEmpty()) {
-            Bukkit.broadcast(ColorScheme.warn(
+            broadcast(ColorScheme.warn(
                     "§e⚠ §7No players to announce this cycle."));
             return;
         }
 
         // ── Build the announcement message ───────────────────────────────
+        String prefix = cfg.getMessagePrefix();
         List<String> lines = new ArrayList<>();
         lines.add(ColorScheme.DIVIDER);
         lines.add(ColorScheme.HEADER);
         lines.add(ColorScheme.DIVIDER);
         for (PlayerCoordinate pc : coords) {
-            lines.add(formatLine(pc));
+            lines.add(prefix + formatLine(pc));
         }
         lines.add(ColorScheme.DIVIDER);
 
         for (String line : lines) {
-            Bukkit.broadcast(ColorScheme.c(line));
+            broadcast(ColorScheme.c(line));
         }
     }
 
@@ -185,12 +216,15 @@ public class AnnouncementManager {
         List<PlayerCoordinate> result = new ArrayList<>();
 
         if (cfg.getMode() == PluginConfig.AnnouncementMode.ALL) {
+            int onlineCount = Bukkit.getOnlinePlayers().size();
+            result = new ArrayList<>(onlineCount);
             for (Player p : Bukkit.getOnlinePlayers()) {
                 if (NpcFilter.isNpc(p, cfg.isFilterNpcs())) continue;
                 result.add(PlayerCoordinate.live(p.getName(), p.getLocation()));
             }
         } else {
             // CUSTOM mode
+            result = new ArrayList<>(cfg.getCustomPlayers().size());
             for (CustomPlayer cp : cfg.getCustomPlayers()) {
                 Player online = Bukkit.getPlayer(cp.uuid());
                 if (online != null && online.isOnline()) {
@@ -200,8 +234,7 @@ public class AnnouncementManager {
                     // Offline
                     if (cfg.getOfflineHandling() == PluginConfig.OfflineHandling.SHOW) {
                         Location last = plugin.getOfflinePositionCache().getCachedLocation(cp.uuid());
-                        com.crazysmpmods.coordinateannouncer.model.Dimension cachedDim =
-                                plugin.getOfflinePositionCache().getCachedDimension(cp.uuid());
+                        Dimension cachedDim = plugin.getOfflinePositionCache().getCachedDimension(cp.uuid());
                         if (last != null && cachedDim != null) {
                             // Use the cached dimension (handles unloaded worlds correctly)
                             result.add(new PlayerCoordinate(
@@ -213,7 +246,7 @@ public class AnnouncementManager {
                             // No cached position — show "unknown" line
                             result.add(new PlayerCoordinate(
                                     cp.name(), 0, 0, 0,
-                                    com.crazysmpmods.coordinateannouncer.model.Dimension.UNKNOWN,
+                                    Dimension.UNKNOWN,
                                     false));
                         }
                     }
@@ -225,6 +258,22 @@ public class AnnouncementManager {
         // Sort alphabetically by username for consistent output
         result.sort((a, b) -> a.username().compareToIgnoreCase(b.username()));
         return result;
+    }
+
+    // ── Broadcast helper (respects announce-to-console setting) ───────────
+
+    /**
+     * Broadcast a Component to all online players + optionally console.
+     */
+    private void broadcast(Component msg) {
+        // Always send to online players
+        for (Player p : Bukkit.getOnlinePlayers()) {
+            p.sendMessage(msg);
+        }
+        // Conditionally log to console
+        if (plugin.getPluginConfig().isAnnounceToConsole()) {
+            Bukkit.getConsoleSender().sendMessage(msg);
+        }
     }
 
     // ── Countdown logic ───────────────────────────────────────────────────
@@ -257,18 +306,19 @@ public class AnnouncementManager {
 
             int remaining = TOTAL - elapsed;
 
+            // Use if-else chain (primitive int comparison — no autoboxing)
             if (remaining == 10) {
-                broadcast("§e⚠ §6WARNING: §f10 seconds before the coordinates get announced!");
+                broadcast(ColorScheme.c("§e⚠ §6WARNING: §f10 seconds before the coordinates get announced!"));
             } else if (remaining == 5) {
-                broadcast("§e⚠ §65 §fseconds before the coordinates get announced");
+                broadcast(ColorScheme.c("§e⚠ §65 §fseconds before the coordinates get announced"));
             } else if (remaining == 4) {
-                broadcast("§e⚠ §e4");
+                broadcast(ColorScheme.c("§e⚠ §e4"));
             } else if (remaining == 3) {
-                broadcast("§e⚠ §63");
+                broadcast(ColorScheme.c("§e⚠ §63"));
             } else if (remaining == 2) {
-                broadcast("§e⚠ §62");
+                broadcast(ColorScheme.c("§e⚠ §62"));
             } else if (remaining == 1) {
-                broadcast("§e⚠ §c1");
+                broadcast(ColorScheme.c("§e⚠ §c1"));
             } else if (remaining <= 0) {
                 // Fire announcement and cancel self
                 broadcastAnnouncement();
@@ -280,18 +330,6 @@ public class AnnouncementManager {
             }
 
             elapsed++;
-        }
-
-        private void broadcast(String msg) {
-            PluginConfig cfg = plugin.getPluginConfig();
-            if (cfg.isCountdownGlobal()) {
-                Bukkit.broadcast(ColorScheme.c(msg));
-            } else {
-                // Only send to players who will receive the announcement
-                for (Player p : Bukkit.getOnlinePlayers()) {
-                    p.sendMessage(ColorScheme.c(msg));
-                }
-            }
         }
     }
 
