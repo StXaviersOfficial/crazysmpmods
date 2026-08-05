@@ -1,0 +1,35 @@
+name: CoordinateAnnouncer
+version: '${version}'
+main: com.crazysmpmods.coordinateannouncer.CoordinateAnnouncer
+api-version: '1.21.11'
+authors: [QuackPlayzYT, CrazySMPMods]
+description: Periodically announces player coordinates in chat with a 10-second countdown. Highly customizable via chest GUI.
+website: https://github.com/StXaviersOfficial/crazysmpmods
+
+commands:
+  coordinateannouncer:
+    description: Coordinate Announcer main command
+    usage: |
+      §d§l=== Coordinate Announcer ===
+      §e/ca toggle §7- Enable/disable announcements
+      §e/ca gui §7- Open the customization menu
+      §e/ca delay <value> <unit> §7- Set delay (units: seconds, minutes, hours, days)
+      §e/ca player add <name> §7- Add player to custom list
+      §e/ca player remove <name> §7- Remove player from custom list
+      §e/ca player list §7- List custom players
+      §e/ca player clear §7- Clear custom player list
+      §e/ca mode all §7- Announce ALL online players
+      §e/ca mode custom §7- Announce ONLY custom-listed players
+      §e/ca offline show §7- Show offline players with last-known coords
+      §e/ca offline skip §7- Skip offline players silently
+      §e/ca info §7- Show current settings
+      §e/ca reload §7- Reload config from disk
+      §e/ca help §7- Show this help
+    aliases: [ca]
+    permission: coordinateannouncer.admin
+    permission-message: §cYou must be an operator to use this command.
+
+permissions:
+  coordinateannouncer.admin:
+    description: Allows use of all Coordinate Announcer commands (OP-only by default).
+    default: op

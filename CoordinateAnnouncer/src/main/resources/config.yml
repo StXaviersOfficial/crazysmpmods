@@ -1,0 +1,55 @@
+# =============================================================
+#                  COORDINATE ANNOUNCER
+#         CrazySMP Mods — by QuackPlayzYT
+# =============================================================
+#
+#  All settings below can also be changed in-game via /ca gui
+#  (chest GUI). Changes made in GUI are saved here automatically.
+#  Manual edits to this file require /ca reload.
+# =============================================================
+
+# Whether announcements are currently enabled.
+# Set to false on first install — operator must explicitly /ca toggle.
+enabled: false
+
+# Delay between announcements.
+# Format: <integer> <unit>  where unit ∈ {seconds, minutes, hours, days}
+# Minimum: 15 seconds (the 10s + 5s countdown needs at least 11s, +4s buffer).
+# Default: 60 minutes (1 hour).
+delay:
+  value: 60
+  unit: MINUTES
+
+# Which players to announce.
+#   ALL    = every currently-online player
+#   CUSTOM = only players added via /ca player add <name>
+mode: ALL
+
+# How to handle players on the custom list who are offline at announcement time.
+#   SHOW = display "[OFFLINE] <name> → Last known: X Y Z (dim)" using cached position
+#   SKIP = silently omit them from the announcement
+# This setting has NO effect when mode=ALL (all-online-players mode only shows
+# players who are currently online — there is no "offline" case).
+offline-handling: SHOW
+
+# The list of custom players (used when mode=CUSTOM).
+# Stored as a list of {uuid, name, last_known_position} entries.
+# Edits via /ca player add|remove — DO NOT edit manually unless you know the UUIDs.
+custom-players: []
+
+# =============================================================
+#  ADVANCED (do not change unless you know what you're doing)
+# =============================================================
+
+# Throttle for PlayerMoveEvent position cache updates (in milliseconds).
+# Lower = more accurate last-known coords but more CPU. 5000ms = 5s.
+position-cache-throttle-ms: 5000
+
+# Whether to filter out non-player "fake players" (Citizens NPCs, Carpet mod
+# fake players, etc.) from announcements.
+filter-npcs: true
+
+# Whether the countdown messages should be sent globally (true) or only to
+# players who will receive the announcement (false — useful for custom mode
+# where the list is small).
+countdown-global: true
