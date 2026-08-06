@@ -96,7 +96,7 @@ Steve → -100 70 250 (Nether)
 ```bash
 cd CoordinateAnnouncer
 ./gradlew build
-# Output: build/libs/CoordinateAnnouncer-1.0.0.jar
+# Output: build/libs/CoordinateAnnouncer-<version>.jar
 ```
 
 Drop the .jar into your Paper server's `plugins/` folder and restart.

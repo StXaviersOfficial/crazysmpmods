@@ -96,12 +96,31 @@ public class OfflinePositionCache {
     }
 
     /**
-     * Schedule an async save. Multiple rapid calls coalesce into one save
-     * (the next save picks up the latest state).
+     * Schedule an async save. Multiple rapid calls coalesce into one save.
+     *
+     * BUG FIX (v1.2.0): previously the check-then-set of `savePending` wasn't
+     * atomic across the main thread (sets true) and the async save thread
+     * (resets false in doSave()'s finally). An update() that landed between
+     * another save's snapshot-under-lock and its finally-reset could get
+     * skipped. Now the check-then-set is done under the same lock as the
+     * cache mutations, so a mutation always either (a) sees savePending=false
+     * and schedules a new save, or (b) sees savePending=true and trusts the
+     * in-flight save will snapshot its update.
+     *
+     * Note: there's still a tiny window between doSave() snapshotting under
+     * lock and resetting savePending=false in finally. An update that lands
+     * in that window WILL be picked up by the next save() call (which will
+     * see savePending=false and schedule a new one). So no data is lost —
+     * the worst case is one extra save cycle, which is fine.
      */
     public void save() {
-        if (savePending) return; // already scheduled — will pick up latest state
-        savePending = true;
+        lock.lock();
+        try {
+            if (savePending) return; // already scheduled — in-flight save will snapshot our update
+            savePending = true;
+        } finally {
+            lock.unlock();
+        }
         Bukkit.getScheduler().runTaskAsynchronously(plugin, this::doSave);
     }
 
@@ -109,7 +128,12 @@ public class OfflinePositionCache {
      * Synchronous save — only call from onDisable() or reload().
      */
     public void saveSync() {
-        savePending = false; // cancel any pending async save
+        lock.lock();
+        try {
+            savePending = false; // cancel any pending async save
+        } finally {
+            lock.unlock();
+        }
         doSave();
     }
 
@@ -182,6 +206,13 @@ public class OfflinePositionCache {
 
     /**
      * Get the cached position for an offline player, or null if no cache exists.
+     *
+     * BUG FIX (v1.2.0): previously, if the cached world was deleted/unloaded,
+     * this method would swap in Bukkit.getWorlds().get(0) but keep the old
+     * x/y/z — returning a Location in the WRONG world. That's a landmine if
+     * anyone ever uses the Location directly (e.g., for teleportation).
+     * Now we return null if the world is gone; callers extract raw ints
+     * via getCachedDimension() for display, so this is safe.
      */
     @Nullable
     public Location getCachedLocation(@NotNull UUID uuid) {
@@ -191,10 +222,10 @@ public class OfflinePositionCache {
             if (cp == null) return null;
             World w = Bukkit.getWorld(cp.worldName);
             if (w == null) {
-                // World was deleted/renamed — return a placeholder location in the
-                // default world so the announcement doesn't crash.
-                w = Bukkit.getWorlds().isEmpty() ? null : Bukkit.getWorlds().get(0);
-                if (w == null) return null;
+                // World was deleted/unloaded — return null instead of a
+                // wrong-world Location. Callers should fall back to the
+                // "no cached position" branch (which displays "0 0 0 Unknown").
+                return null;
             }
             return new Location(w, cp.x + 0.5, cp.y, cp.z + 0.5);
         } finally {

@@ -129,8 +129,18 @@ public class AnnouncementManager {
 
     /**
      * Fire an announcement immediately, skipping the countdown (for /ca now).
+     *
+     * BUG FIX (v1.2.0): Previously this didn't cancel any in-flight countdown,
+     * so running `/ca now` while a countdown was ticking would cause a DOUBLE
+     * announcement (immediate one + the countdown's announcement a few
+     * seconds later). Now we cancel any running countdown first.
      */
     public void triggerImmediate() {
+        // Cancel any running countdown first — prevents double-announce
+        if (countdownTaskId != null) {
+            Bukkit.getScheduler().cancelTask(countdownTaskId);
+            countdownTaskId = null;
+        }
         broadcastAnnouncement();
     }
 
@@ -260,10 +270,11 @@ public class AnnouncementManager {
         return result;
     }
 
-    // ── Broadcast helper (respects announce-to-console setting) ───────────
+    // ── Broadcast helper (respects announce-to-console + countdown-global) ─
 
     /**
      * Broadcast a Component to all online players + optionally console.
+     * Used for the announcement itself — always goes to everyone.
      */
     private void broadcast(Component msg) {
         // Always send to online players
@@ -271,6 +282,41 @@ public class AnnouncementManager {
             p.sendMessage(msg);
         }
         // Conditionally log to console
+        if (plugin.getPluginConfig().isAnnounceToConsole()) {
+            Bukkit.getConsoleSender().sendMessage(msg);
+        }
+    }
+
+    /**
+     * Broadcast a countdown warning.
+     *
+     * BUG FIX (v1.2.0): The `countdown-global` config setting was previously
+     * a "ghost setting" — fully modeled but never actually consulted. Now:
+     *   - countdown-global=true  → send to every online player (default)
+     *   - countdown-global=false → in CUSTOM mode, send ONLY to the custom-listed
+     *                              online players; in ALL mode, send to everyone
+     *                              (since everyone is a recipient anyway)
+     */
+    private void broadcastCountdown(Component msg) {
+        PluginConfig cfg = plugin.getPluginConfig();
+
+        if (cfg.isCountdownGlobal()
+                || cfg.getMode() == PluginConfig.AnnouncementMode.ALL) {
+            // Global: send to every online player
+            for (Player p : Bukkit.getOnlinePlayers()) {
+                p.sendMessage(msg);
+            }
+        } else {
+            // CUSTOM mode + non-global: send only to online custom-listed players
+            for (CustomPlayer cp : cfg.getCustomPlayers()) {
+                Player online = Bukkit.getPlayer(cp.uuid());
+                if (online != null && online.isOnline()) {
+                    online.sendMessage(msg);
+                }
+            }
+        }
+
+        // Conditionally log to console (always — console sees everything)
         if (plugin.getPluginConfig().isAnnounceToConsole()) {
             Bukkit.getConsoleSender().sendMessage(msg);
         }
@@ -307,18 +353,20 @@ public class AnnouncementManager {
             int remaining = TOTAL - elapsed;
 
             // Use if-else chain (primitive int comparison — no autoboxing)
+            // Note: countdown warnings use broadcastCountdown() which respects
+            // the countdown-global setting (sends only to recipients if false)
             if (remaining == 10) {
-                broadcast(ColorScheme.c("§e⚠ §6WARNING: §f10 seconds before the coordinates get announced!"));
+                broadcastCountdown(ColorScheme.c("§e⚠ §6WARNING: §f10 seconds before the coordinates get announced!"));
             } else if (remaining == 5) {
-                broadcast(ColorScheme.c("§e⚠ §65 §fseconds before the coordinates get announced"));
+                broadcastCountdown(ColorScheme.c("§e⚠ §65 §fseconds before the coordinates get announced"));
             } else if (remaining == 4) {
-                broadcast(ColorScheme.c("§e⚠ §e4"));
+                broadcastCountdown(ColorScheme.c("§e⚠ §e4"));
             } else if (remaining == 3) {
-                broadcast(ColorScheme.c("§e⚠ §63"));
+                broadcastCountdown(ColorScheme.c("§e⚠ §63"));
             } else if (remaining == 2) {
-                broadcast(ColorScheme.c("§e⚠ §62"));
+                broadcastCountdown(ColorScheme.c("§e⚠ §62"));
             } else if (remaining == 1) {
-                broadcast(ColorScheme.c("§e⚠ §c1"));
+                broadcastCountdown(ColorScheme.c("§e⚠ §c1"));
             } else if (remaining <= 0) {
                 // Fire announcement and cancel self
                 broadcastAnnouncement();

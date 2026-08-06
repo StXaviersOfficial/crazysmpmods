@@ -28,6 +28,8 @@ public final class BedrockDetector {
     private static volatile Boolean floodgateAvailable = null;
     private static volatile Method isFloodgatePlayerMethod = null;
     private static volatile Object floodgateApiInstance = null;
+    // Cached prefix — avoids redoing reflection on every lookupUuid call
+    private static volatile String cachedBedrockPrefix = null;
 
     /**
      * Check if Floodgate is installed on the server.
@@ -80,19 +82,29 @@ public final class BedrockDetector {
      * Get the Bedrock username prefix configured in Floodgate (default: ".").
      * Returns "." if Floodgate is not installed (safe default — Bedrock players
      * won't be on the server anyway in that case).
+     *
+     * PERF (v1.2.0): result is cached after first call — previously this
+     * redid the full Class.forName/getMethod/invoke reflection dance on
+     * every call (which happens on every /ca player add via the Bedrock-variant
+     * lookup). Now we cache it.
      */
     public static String getBedrockPrefix() {
-        if (!isFloodgateAvailable()) return ".";
-        try {
-            Class<?> apiClass = Class.forName("org.geysermc.floodgate.api.FloodgateApi");
-            Method getInstance = apiClass.getMethod("getInstance");
-            Object api = getInstance.invoke(null);
-            Method getPrefix = apiClass.getMethod("getPlayerPrefix");
-            Object prefix = getPrefix.invoke(api);
-            return prefix != null ? prefix.toString() : ".";
-        } catch (Throwable t) {
-            return ".";
+        if (cachedBedrockPrefix != null) return cachedBedrockPrefix;
+        String prefix = ".";
+        if (isFloodgateAvailable()) {
+            try {
+                Class<?> apiClass = Class.forName("org.geysermc.floodgate.api.FloodgateApi");
+                Method getInstance = apiClass.getMethod("getInstance");
+                Object api = getInstance.invoke(null);
+                Method getPrefix = apiClass.getMethod("getPlayerPrefix");
+                Object prefixObj = getPrefix.invoke(api);
+                if (prefixObj != null) prefix = prefixObj.toString();
+            } catch (Throwable t) {
+                // Fall back to default "."
+            }
         }
+        cachedBedrockPrefix = prefix;
+        return prefix;
     }
 
     /**

@@ -100,7 +100,7 @@ public class GUIManager implements Listener {
     //
     //  Row 0:  [TITLE in slot 4]
     //  Rows 1-4: player head slots 9..44 (36 slots = 36 players per page)
-    //  Row 5:  [PREV in slot 45] [ADD-HINT in slot 49] [NEXT in slot 53] [CLOSE in slot 53]
+    //  Row 5:  [PREV in slot 45] [CLOSE in slot 49] [NEXT in slot 53]
     //
     private static final int SLOT_P_TITLE = 4;
     private static final int SLOT_P_PREV  = 45;

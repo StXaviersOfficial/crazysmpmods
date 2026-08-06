@@ -7,7 +7,7 @@ description: Periodically announces player coordinates in chat with a 10-second 
 website: https://github.com/StXaviersOfficial/crazysmpmods
 
 # Soft-depend on Floodgate (Geyser's companion) so we load AFTER it.
-# This ensures BedrockDetector.canDetect() returns true once we're enabled.
+# This ensures BedrockDetector.isFloodgateAvailable() returns true once we're enabled.
 softdepend:
   - floodgate
   - GeyserMC

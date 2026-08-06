@@ -47,6 +47,20 @@ public final class ColorScheme {
     }
 
     /**
+     * Translate &-prefixed color codes (Minecraft chat format) to §-prefixed
+     * codes (Java string format). This is what users actually type in chat
+     * since they can't enter § on most keyboards.
+     *
+     * E.g., "&c[ALERT] " → "§c[ALERT] "
+     *
+     * Also handles the special case of "&&" → "&" (literal ampersand).
+     */
+    public static String translateAmpersand(String text) {
+        if (text == null) return "";
+        return org.bukkit.ChatColor.translateAlternateColorCodes('&', text);
+    }
+
+    /**
      * Build a warning Component (used by the countdown).
      */
     public static Component warn(String legacyText) {

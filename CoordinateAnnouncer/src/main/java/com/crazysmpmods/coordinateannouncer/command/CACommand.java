@@ -304,6 +304,13 @@ public class CACommand implements CommandExecutor, TabCompleter {
     }
 
     private void handleNow(@NotNull CommandSender sender) {
+        // BUG FIX (v1.2.0): added enabled-check to match /ca test behavior.
+        // Previously /ca now worked even when the plugin was disabled, which
+        // was inconsistent and could confuse operators.
+        if (!plugin.getPluginConfig().isEnabled()) {
+            sender.sendMessage(ColorScheme.error("Plugin is disabled. Use §e/ca toggle §ffirst."));
+            return;
+        }
         sender.sendMessage(ColorScheme.info("Triggering immediate announcement (no countdown)..."));
         plugin.getAnnouncementManager().triggerImmediate();
     }
@@ -335,6 +342,7 @@ public class CACommand implements CommandExecutor, TabCompleter {
             String current = plugin.getPluginConfig().getMessagePrefix();
             sender.sendMessage(ColorScheme.info("Current prefix: §r" + (current.isEmpty() ? "§8(empty)" : current)));
             sender.sendMessage("§7Usage: §e/ca prefix <text> §7or §e/ca prefix clear");
+            sender.sendMessage("§7Supports §e&§7-color codes (e.g., §e&c[ALERT] §7= red)");
             return;
         }
         if (args[1].equalsIgnoreCase("clear") || args[1].equalsIgnoreCase("none") || args[1].equalsIgnoreCase("off")) {
@@ -348,8 +356,11 @@ public class CACommand implements CommandExecutor, TabCompleter {
             if (i > 1) sb.append(" ");
             sb.append(args[i]);
         }
-        plugin.getPluginConfig().setMessagePrefix(sb.toString());
-        sender.sendMessage(ColorScheme.success("Message prefix set to: §r" + sb));
+        // BUG FIX (v1.2.0): translate &-codes to §-codes since users can't
+        // type § in normal chat. E.g., "&c[ALERT] " → "§c[ALERT] "
+        String translated = ColorScheme.translateAmpersand(sb.toString());
+        plugin.getPluginConfig().setMessagePrefix(translated);
+        sender.sendMessage(ColorScheme.success("Message prefix set to: §r" + translated));
     }
 
     private void handleConsole(@NotNull CommandSender sender, @NotNull String[] args) {

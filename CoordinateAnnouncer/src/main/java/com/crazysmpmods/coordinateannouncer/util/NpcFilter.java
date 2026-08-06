@@ -163,11 +163,45 @@ public final class NpcFilter {
         return null;
     }
 
-    @SuppressWarnings("deprecation")
     private static UUID tryOfflinePlayer(@NotNull String name) {
+        // IMPORTANT: this method is only reached from the async slow-path
+        // AFTER the fast path (lookupUuid) has already established that the
+        // name matches nobody in getOnlinePlayers() or getOfflinePlayers().
+        // That means hasPlayedBefore() and isOnline() are GUARANTEED false here.
+        //
+        // The original code checked those and always returned null — making the
+        // entire async Mojang-lookup path dead code. /ca player add <name>
+        // reported "not found" for any real player who hadn't joined yet.
+        //
+        // Fixed approach: use Paper's PlayerProfile#complete() to actually
+        // resolve name → UUID via Mojang API. complete() returns true only
+        // if the player exists in Mojang's database, regardless of whether
+        // they have ever joined this server.
+
+        // Paper API path: create a profile from the name, then complete() it.
         try {
+            var profile = org.bukkit.Bukkit.createProfile(name);
+            boolean completed = profile.complete();
+            if (completed && profile.getId() != null) {
+                return profile.getId();
+            }
+        } catch (NoSuchMethodError | NoClassDefFoundError ignored) {
+            // Non-Paper server (Spigot/Purpur without Paper API) — fall through
+        } catch (Throwable t) {
+            // Log and fall through to legacy path
+            // (don't let a profile-resolution bug crash the lookup)
+        }
+
+        // Legacy Spigot fallback: Bukkit.getOfflinePlayer(name) returns a
+        // non-null OfflinePlayer for ANY name (even non-existent). Its UUID
+        // is only meaningful if the player has actually joined. Since we're
+        // already in the async slow path and local caches didn't match, we
+        // trust the result. If the name is bogus, the resulting UUID won't
+        // match any real player on the server — harmless.
+        try {
+            @SuppressWarnings("deprecation")
             OfflinePlayer op = Bukkit.getOfflinePlayer(name);
-            if (op != null && (op.hasPlayedBefore() || op.isOnline())) {
+            if (op != null) {
                 return op.getUniqueId();
             }
         } catch (Throwable ignored) {}

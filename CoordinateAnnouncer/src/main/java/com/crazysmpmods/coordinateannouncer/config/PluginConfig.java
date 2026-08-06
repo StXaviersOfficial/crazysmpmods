@@ -174,7 +174,7 @@ public class PluginConfig {
             } else {
                 for (CustomPlayer cp : customPlayers) {
                     sb.append("  - uuid: \"").append(cp.uuid()).append("\"\n");
-                    sb.append("    name: \"").append(cp.name()).append("\"\n");
+                    sb.append("    name: \"").append(escapeYamlString(cp.name())).append("\"\n");
                 }
                 sb.append("\n");
             }
@@ -209,7 +209,7 @@ public class PluginConfig {
             sb.append("# Custom prefix prepended to each announcement line (after the header).\n");
             sb.append("# E.g., set to \"[Tracker] \" to get \"[Tracker] QuackPlayzYT → 20 28 -483 (Overworld)\".\n");
             sb.append("# Leave empty for no prefix. Supports §-color codes.\n");
-            sb.append("message-prefix: \"").append(messagePrefix.replace("\"", "\\\"")).append("\"\n");
+            sb.append("message-prefix: \"").append(escapeYamlString(messagePrefix)).append("\"\n");
 
             String data = sb.toString();
 
@@ -243,6 +243,36 @@ public class PluginConfig {
         } finally {
             lock.unlock();
         }
+        // BUG FIX (v1.2.0): previously resetToDefaults() did NOT save, which
+        // meant that if load() failed and fell back to defaults, the corrupted
+        // file on disk was never healed. Now we save the defaults so the file
+        // is rewritten cleanly.
+        save();
+    }
+
+    /**
+     * Escape a string for use inside a double-quoted YAML scalar.
+     *
+     * Order matters: backslashes MUST be escaped FIRST, otherwise the
+     * backslash we add when escaping quotes would itself get escaped.
+     *
+     * Handles: \ → \\, " → \", and standard YAML control chars (\n, \r, \t).
+     */
+    private static String escapeYamlString(@NotNull String s) {
+        if (s == null) return "";
+        StringBuilder sb = new StringBuilder(s.length() + 8);
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            switch (c) {
+                case '\\' -> sb.append("\\\\");  // MUST be first
+                case '"'  -> sb.append("\\\"");
+                case '\n' -> sb.append("\\n");
+                case '\r' -> sb.append("\\r");
+                case '\t' -> sb.append("\\t");
+                default   -> sb.append(c);
+            }
+        }
+        return sb.toString();
     }
 
     // ── Getters / Setters (each setter auto-saves) ────────────────────────
@@ -271,6 +301,24 @@ public class PluginConfig {
     }
 
     public void setDelay(long value, @NotNull DelayUnit unit) {
+        // BUG FIX (v1.2.0): centralize the 15s minimum clamp HERE so all callers
+        // (CACommand, GUIManager, ChatInputListener callback) get consistent
+        // validation. Previously each call site validated independently, which
+        // was a landmine for any future caller that forgets to validate.
+        // If the delay were ever set below ~11s, onMainFire()'s "cancel if
+        // countdown already running" guard would mean every cycle interrupts
+        // the last and the announcement never actually fires.
+        if (value < 1) {
+            plugin.getLogger().warning("setDelay(" + value + ", " + unit + "): value < 1, clamping to 1");
+            value = 1;
+        }
+        long seconds = unit.toSeconds(value);
+        if (seconds < 15) {
+            plugin.getLogger().warning("setDelay(" + value + ", " + unit + "): " + seconds
+                    + "s is below minimum 15s, clamping to 15s");
+            value = 15;
+            unit = DelayUnit.SECONDS;
+        }
         lock.lock();
         try {
             this.delayValue = value;
