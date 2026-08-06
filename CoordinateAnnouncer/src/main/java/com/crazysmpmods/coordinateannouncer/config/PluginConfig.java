@@ -68,6 +68,7 @@ public class PluginConfig {
     // ── Load / Save ───────────────────────────────────────────────────────
 
     public void load() {
+        boolean needsSave;
         lock.lock();
         try {
             // Bug fix: load into a FRESH YamlConfiguration instead of mutating
@@ -111,7 +112,7 @@ public class PluginConfig {
             this.messagePrefix           = cfg.getString("message-prefix", "");
 
             // Validate
-            boolean needsSave = false;
+            needsSave = false;
             if (delayValue <= 0) {
                 plugin.getLogger().warning("Invalid delay value " + delayValue + " — resetting to 60.");
                 delayValue = 60L;
@@ -133,18 +134,22 @@ public class PluginConfig {
                 delayUnit = DelayUnit.SECONDS;
                 needsSave = true;
             }
-            // Bug fix: persist clamped values so bad values don't stay on disk
-            // forever and trigger the warning on every startup.
-            if (needsSave) {
-                try { save(); } catch (Exception saveEx) {
-                    plugin.getLogger().warning("Failed to persist config corrections: " + saveEx.getMessage());
-                }
-            }
         } catch (Exception e) {
             plugin.getLogger().severe("Failed to load config.yml: " + e.getMessage());
             throw new RuntimeException(e);
         } finally {
             lock.unlock();
+        }
+        // Bug fix (v1.3.0): persist clamped values OUTSIDE the lock — previously
+        // save() was called while load() still held the lock, which (a) blocked
+        // all getters/setters during the file write, and (b) meant if save()
+        // itself threw, the lock was held during exception unwinding.
+        if (needsSave) {
+            try {
+                save();
+            } catch (Exception saveEx) {
+                plugin.getLogger().warning("Failed to persist config corrections: " + saveEx.getMessage());
+            }
         }
     }
 

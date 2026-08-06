@@ -101,7 +101,16 @@ public final class NpcFilter {
             }
         }
         // Check offline players who have logged in before (cached, fast on Paper)
-        for (OfflinePlayer op : Bukkit.getOfflinePlayers()) {
+        // Bug fix (v1.3.0): on long-running servers, Bukkit.getOfflinePlayers()
+        // can return tens of thousands of entries. Iterating it on the main thread
+        // (this method is called from lookupUuid which is called sync from
+        // lookupUuidAsync's fast path) can cause a noticeable lag spike.
+        // Cap the iteration at 1000 entries; if the player isn't in the first
+        // 1000, the async slow path (which runs off-main-thread) will handle it.
+        OfflinePlayer[] offline = Bukkit.getOfflinePlayers();
+        int limit = Math.min(offline.length, 1000);
+        for (int i = 0; i < limit; i++) {
+            OfflinePlayer op = offline[i];
             if (op.getName() != null && op.getName().equalsIgnoreCase(name)) {
                 return op.getUniqueId();
             }
@@ -140,12 +149,27 @@ public final class NpcFilter {
                 // (which logs a severe error).
                 com.crazysmpmods.coordinateannouncer.CoordinateAnnouncer inst =
                         com.crazysmpmods.coordinateannouncer.CoordinateAnnouncer.getInstance();
-                if (inst == null) return; // plugin disabled mid-lookup
+                if (inst == null) {
+                    // Bug fix (v1.3.0): previously if the plugin was disabled
+                    // mid-lookup, the callback NEVER fired and the sender saw
+                    // "Looking up..." forever with no resolution. Now we invoke
+                    // the callback with null directly (on the async thread) so
+                    // the caller can display a proper "not found / aborted"
+                    // message. Callers must be prepared for the callback to
+                    // fire on either the main thread OR an async thread when
+                    // the result is null — all current callers only call
+                    // sender.sendMessage() which is thread-safe.
+                    try { callback.accept(null); } catch (Throwable ignored) {}
+                    return;
+                }
                 org.bukkit.Bukkit.getScheduler().runTask(inst, () -> callback.accept(uuid));
             } catch (Throwable tx) {
                 com.crazysmpmods.coordinateannouncer.CoordinateAnnouncer inst =
                         com.crazysmpmods.coordinateannouncer.CoordinateAnnouncer.getInstance();
-                if (inst == null) return;
+                if (inst == null) {
+                    try { callback.accept(null); } catch (Throwable ignored) {}
+                    return;
+                }
                 org.bukkit.Bukkit.getScheduler().runTask(inst, () -> callback.accept(null));
             }
         }, "CA-UUIDLookup-" + name);

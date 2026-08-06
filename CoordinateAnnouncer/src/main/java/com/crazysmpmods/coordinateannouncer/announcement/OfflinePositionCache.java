@@ -373,17 +373,21 @@ public class OfflinePositionCache {
     }
 
     public void clear() {
-        // Bump generation BEFORE clearing so any in-flight async save detects
-        // it was superseded and skips its (now-stale) write — otherwise the
-        // async save could resurrect the purged data after our sync write.
+        // Bug fix (v1.3.0): previously clear() released the lock before calling
+        // saveSync(). An update() landing in that window would be wiped by the
+        // sync save. Now we bump generation + clear the cache + do the sync save
+        // all without releasing the lock between them. doSave() acquires the
+        // lock (reentrant) so this is safe.
         lock.lock();
         try {
             saveGeneration++;
             cache.clear();
+            savePending = false;
+            dirty = false;
+            doSave();
         } finally {
             lock.unlock();
         }
-        saveSync();
     }
 
     /**

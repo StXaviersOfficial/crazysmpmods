@@ -89,7 +89,15 @@ public final class BedrockDetector {
      * lookup). Now we cache it.
      */
     public static String getBedrockPrefix() {
-        if (cachedBedrockPrefix != null) return cachedBedrockPrefix;
+        // Bug fix (v1.3.0): only cache the result if Floodgate is actually
+        // available. Previously, if Floodgate wasn't loaded on the first call
+        // (e.g., loaded after our plugin via a hot plugin manager), the cache
+        // would be stuck at "." forever even after Floodgate came online.
+        // Now we re-check isFloodgateAvailable() on every call until we get
+        // a real prefix from Floodgate, then cache it.
+        if (cachedBedrockPrefix != null && floodgateAvailable != null && floodgateAvailable) {
+            return cachedBedrockPrefix;
+        }
         String prefix = ".";
         if (isFloodgateAvailable()) {
             try {
@@ -102,8 +110,8 @@ public final class BedrockDetector {
             } catch (Throwable t) {
                 // Fall back to default "."
             }
+            cachedBedrockPrefix = prefix;
         }
-        cachedBedrockPrefix = prefix;
         return prefix;
     }
 

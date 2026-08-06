@@ -19,7 +19,7 @@ import java.util.logging.Level;
  * Highly customizable via chest GUI; settings persist across restarts.
  *
  * @author QuackPlayzYT
- * @version 1.0.0
+ * @version 1.3.0
  */
 public final class CoordinateAnnouncer extends JavaPlugin {
 
@@ -128,21 +128,33 @@ public final class CoordinateAnnouncer extends JavaPlugin {
 
     @NotNull
     public PluginConfig getPluginConfig() {
+        if (pluginConfig == null) {
+            throw new IllegalStateException("PluginConfig not yet initialized — onEnable() hasn't finished or has been disabled.");
+        }
         return pluginConfig;
     }
 
     @NotNull
     public OfflinePositionCache getOfflinePositionCache() {
+        if (offlinePositionCache == null) {
+            throw new IllegalStateException("OfflinePositionCache not yet initialized — onEnable() hasn't finished or has been disabled.");
+        }
         return offlinePositionCache;
     }
 
     @NotNull
     public AnnouncementManager getAnnouncementManager() {
+        if (announcementManager == null) {
+            throw new IllegalStateException("AnnouncementManager not yet initialized — onEnable() hasn't finished or has been disabled.");
+        }
         return announcementManager;
     }
 
     @NotNull
     public GUIManager getGuiManager() {
+        if (guiManager == null) {
+            throw new IllegalStateException("GUIManager not yet initialized — onEnable() hasn't finished or has been disabled.");
+        }
         return guiManager;
     }
 

@@ -4,7 +4,7 @@ plugins {
 
 // ── Coordinates ───────────────────────────────────────────────────────────────
 group = "com.crazysmpmods"
-version = "1.2.0"
+version = "1.3.0"
 
 // ── Java toolchain (auto-download JDK 25 via foojay resolver) ─────────────────
 java {

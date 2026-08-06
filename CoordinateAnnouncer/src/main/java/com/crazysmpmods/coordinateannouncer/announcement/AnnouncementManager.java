@@ -46,6 +46,10 @@ public class AnnouncementManager {
     private final CoordinateAnnouncer plugin;
     private Integer mainTaskId = null;
     private Integer countdownTaskId = null;
+    // Generation counter — bumped on every stop() so any in-flight start()
+    // callback can detect it was superseded and bail out before scheduling
+    // a new repeating timer that nobody tracks.
+    private volatile long startGeneration = 0L;
 
     public AnnouncementManager(@NotNull CoordinateAnnouncer plugin) {
         this.plugin = plugin;
@@ -54,6 +58,16 @@ public class AnnouncementManager {
     /**
      * Start the periodic announcement task with the current delay.
      * The first fire uses firstFireDelaySeconds (if set) or the regular delay.
+     *
+     * BUG FIX (v1.3.0): Previously, if stop() was called between the runTaskLater
+     * scheduling and the first-fire callback executing, the callback would run
+     * anyway and create a NEW runTaskTimer — assigned to mainTaskId — that
+     * nobody could cancel (the stop() already returned). The new timer would
+     * run forever, firing announcements even after the plugin was "disabled".
+     *
+     * Fix: use a generation counter. stop() bumps the generation; the callback
+     * checks if its generation is still current before scheduling the repeating
+     * timer. If stop() ran first, the callback is a no-op.
      */
     public void start() {
         stop(); // always cancel any existing task first
@@ -76,11 +90,16 @@ public class AnnouncementManager {
                 + (firstFireTicks / 20) + "s, then every "
                 + (regularDelayTicks / 20) + "s");
 
-        // We use a single repeating task at the REGULAR delay, but we
-        // schedule the FIRST fire separately at firstFireTicks.
-        // After the first fire, we reschedule at the regular delay.
+        // Capture the generation so the callback can detect if stop() ran first
+        final long myGen = ++startGeneration;
+
         mainTaskId = Bukkit.getScheduler().runTaskLater(plugin, () -> {
+            // If stop() was called between scheduling and this callback firing,
+            // bail out — don't create a new repeating timer that nobody tracks.
+            if (myGen != startGeneration) return;
             onMainFire();
+            // Re-check after onMainFire() in case it called stop() internally
+            if (myGen != startGeneration) return;
             // Now schedule the repeating task at regular delay
             mainTaskId = Bukkit.getScheduler().runTaskTimer(plugin, this::onMainFire,
                     regularDelayTicks, regularDelayTicks).getTaskId();
@@ -89,8 +108,11 @@ public class AnnouncementManager {
 
     /**
      * Stop everything (main task + any running countdown).
+     * Bumps the generation counter so any in-flight start() callback
+     * detects it was superseded and doesn't schedule a new timer.
      */
     public void stop() {
+        startGeneration++; // invalidate any in-flight start() callback
         if (mainTaskId != null) {
             Bukkit.getScheduler().cancelTask(mainTaskId);
             mainTaskId = null;
