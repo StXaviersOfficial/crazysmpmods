@@ -128,20 +128,29 @@ public final class NpcFilter {
         // Slow path: run Bukkit.getOfflinePlayer(name) on a separate thread
         // (this hits Mojang API and can take 1-5 seconds)
         // Try both the plain name and the Bedrock-prefixed name.
-        new Thread(() -> {
+        // Bug fix: the thread is now a DAEMON thread so it doesn't block
+        // JVM shutdown if the operator stops the server mid-lookup.
+        Thread t = new Thread(() -> {
             try {
                 Thread.currentThread().setName("CoordinateAnnouncer-UUIDLookup-" + name);
                 UUID uuid = tryLookupWithBedrockVariants(name);
                 // Schedule callback on main thread
-                org.bukkit.Bukkit.getScheduler().runTask(
-                        com.crazysmpmods.coordinateannouncer.CoordinateAnnouncer.getInstance(),
-                        () -> callback.accept(uuid));
-            } catch (Throwable t) {
-                org.bukkit.Bukkit.getScheduler().runTask(
-                        com.crazysmpmods.coordinateannouncer.CoordinateAnnouncer.getInstance(),
-                        () -> callback.accept(null));
+                // Bug fix: getInstance() can return null during the disable→enable
+                // window. Bail out gracefully instead of passing null to runTask
+                // (which logs a severe error).
+                com.crazysmpmods.coordinateannouncer.CoordinateAnnouncer inst =
+                        com.crazysmpmods.coordinateannouncer.CoordinateAnnouncer.getInstance();
+                if (inst == null) return; // plugin disabled mid-lookup
+                org.bukkit.Bukkit.getScheduler().runTask(inst, () -> callback.accept(uuid));
+            } catch (Throwable tx) {
+                com.crazysmpmods.coordinateannouncer.CoordinateAnnouncer inst =
+                        com.crazysmpmods.coordinateannouncer.CoordinateAnnouncer.getInstance();
+                if (inst == null) return;
+                org.bukkit.Bukkit.getScheduler().runTask(inst, () -> callback.accept(null));
             }
-        }, "CA-UUIDLookup").start();
+        }, "CA-UUIDLookup-" + name);
+        t.setDaemon(true);
+        t.start();
     }
 
     @SuppressWarnings("deprecation")
@@ -194,14 +203,15 @@ public final class NpcFilter {
 
         // Legacy Spigot fallback: Bukkit.getOfflinePlayer(name) returns a
         // non-null OfflinePlayer for ANY name (even non-existent). Its UUID
-        // is only meaningful if the player has actually joined. Since we're
-        // already in the async slow path and local caches didn't match, we
-        // trust the result. If the name is bogus, the resulting UUID won't
-        // match any real player on the server — harmless.
+        // is only meaningful if the player has actually joined.
+        // Bug fix: only return the UUID if the player has actually played
+        // before or is currently online. Previously this returned a UUID for
+        // any name — including non-existent players — which would add bogus
+        // entries to the custom list that display "0 0 0 Unknown" forever.
         try {
             @SuppressWarnings("deprecation")
             OfflinePlayer op = Bukkit.getOfflinePlayer(name);
-            if (op != null) {
+            if (op != null && (op.hasPlayedBefore() || op.isOnline())) {
                 return op.getUniqueId();
             }
         } catch (Throwable ignored) {}

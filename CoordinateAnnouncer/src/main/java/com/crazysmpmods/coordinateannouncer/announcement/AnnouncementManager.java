@@ -9,7 +9,6 @@ import com.crazysmpmods.coordinateannouncer.util.ColorScheme;
 import com.crazysmpmods.coordinateannouncer.util.NpcFilter;
 import net.kyori.adventure.text.Component;
 import org.bukkit.Bukkit;
-import org.bukkit.Location;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
 import org.jetbrains.annotations.NotNull;
@@ -47,7 +46,6 @@ public class AnnouncementManager {
     private final CoordinateAnnouncer plugin;
     private Integer mainTaskId = null;
     private Integer countdownTaskId = null;
-    private boolean isFirstFire = true;
 
     public AnnouncementManager(@NotNull CoordinateAnnouncer plugin) {
         this.plugin = plugin;
@@ -59,7 +57,6 @@ public class AnnouncementManager {
      */
     public void start() {
         stop(); // always cancel any existing task first
-        isFirstFire = true;
 
         PluginConfig cfg = plugin.getPluginConfig();
         long regularDelayTicks = cfg.getDelayUnit().toTicks(cfg.getDelayValue());
@@ -70,8 +67,8 @@ public class AnnouncementManager {
         if (firstFireSeconds < 0) {
             firstFireTicks = regularDelayTicks; // use regular delay
         } else {
-            // Clamp to minimum 15s
-            long clamped = Math.max(15, firstFireSeconds);
+            // Clamp to minimum 15s and maximum 1 year (prevents overflow)
+            long clamped = Math.max(15, Math.min(31_536_000L, firstFireSeconds));
             firstFireTicks = clamped * 20L;
         }
 
@@ -83,7 +80,6 @@ public class AnnouncementManager {
         // schedule the FIRST fire separately at firstFireTicks.
         // After the first fire, we reschedule at the regular delay.
         mainTaskId = Bukkit.getScheduler().runTaskLater(plugin, () -> {
-            isFirstFire = false;
             onMainFire();
             // Now schedule the repeating task at regular delay
             mainTaskId = Bukkit.getScheduler().runTaskTimer(plugin, this::onMainFire,
@@ -158,13 +154,11 @@ public class AnnouncementManager {
             countdownTaskId = null;
         }
 
-        // Edge case: empty custom list + CUSTOM mode → no point in countdown
+        // Edge case: empty custom list + CUSTOM mode → log to console only
+        // (previously broadcast to all players every cycle = spam)
         if (cfg.getMode() == PluginConfig.AnnouncementMode.CUSTOM
                 && cfg.getCustomPlayers().isEmpty()) {
-            broadcast(ColorScheme.warn(
-                    "§e⚠ §cAnnouncement skipped: CUSTOM mode is selected but no players are added."));
-            broadcast(ColorScheme.warn(
-                    "§7Use §e/ca player add <name> §7to add players, or §e/ca mode all §7to switch."));
+            plugin.getLogger().warning("CUSTOM mode active but custom list is empty — skipping announcement. Use /ca player add <name> or /ca mode all.");
             return;
         }
 
@@ -243,14 +237,17 @@ public class AnnouncementManager {
                 } else {
                     // Offline
                     if (cfg.getOfflineHandling() == PluginConfig.OfflineHandling.SHOW) {
-                        Location last = plugin.getOfflinePositionCache().getCachedLocation(cp.uuid());
-                        Dimension cachedDim = plugin.getOfflinePositionCache().getCachedDimension(cp.uuid());
-                        if (last != null && cachedDim != null) {
-                            // Use the cached dimension (handles unloaded worlds correctly)
+                        // Bug fix: use getCachedRaw() so we get the real x/y/z even
+                        // when the cached world is currently unloaded. Previously,
+                        // getCachedLocation() returned null for unloaded worlds,
+                        // causing offline players to display "0 0 0 Unknown"
+                        // despite the cache holding valid coordinates.
+                        OfflinePositionCache.RawPos raw = plugin.getOfflinePositionCache().getCachedRaw(cp.uuid());
+                        if (raw != null) {
                             result.add(new PlayerCoordinate(
                                     cp.name(),
-                                    last.getBlockX(), last.getBlockY(), last.getBlockZ(),
-                                    cachedDim,
+                                    raw.x(), raw.y(), raw.z(),
+                                    raw.dim(),
                                     false));
                         } else {
                             // No cached position — show "unknown" line
@@ -374,6 +371,11 @@ public class AnnouncementManager {
                     Bukkit.getScheduler().cancelTask(countdownTaskId);
                     countdownTaskId = null;
                 }
+                // Bug fix: increment elapsed here too, so the MAX_ITERATIONS
+                // guard at the top can actually engage if cancelTask() fails
+                // to remove the task (otherwise elapsed stays pinned at TOTAL
+                // and the guard never fires, causing an infinite announce loop).
+                elapsed++;
                 return;
             }
 

@@ -41,8 +41,11 @@ public final class ColorScheme {
     /**
      * Convert a §-prefixed legacy string to an Adventure Component.
      * This is what you should call before passing to Bukkit.broadcast / sendMessage.
+     * Bug fix: null-safe — returns Component.empty() for null input instead of
+     * throwing NPE from LEGACY_SECTION.deserialize(null).
      */
     public static Component c(String legacyText) {
+        if (legacyText == null) return Component.empty();
         return LEGACY_SECTION.deserialize(legacyText);
     }
 

@@ -14,6 +14,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.StandardCopyOption;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -47,6 +48,13 @@ public class OfflinePositionCache {
 
     // Tracks whether a save is currently scheduled (prevents stacking async saves)
     private volatile boolean savePending = false;
+    // Dirty flag: set when an update lands while a save is in-flight, so doSave()
+    // schedules a follow-up save. Prevents data loss if the server crashes
+    // between snapshot and the in-flight save completing.
+    private boolean dirty = false;
+    // Generation counter: incremented on every saveSync()/clear()/flush() so a
+    // stale in-flight async save can detect it was superseded and skip its write.
+    private long saveGeneration = 0;
 
     /** Max age in ms before a cached entry is pruned (30 days). */
     private static final long MAX_AGE_MS = 30L * 24 * 60 * 60 * 1000;
@@ -116,7 +124,16 @@ public class OfflinePositionCache {
     public void save() {
         lock.lock();
         try {
-            if (savePending) return; // already scheduled — in-flight save will snapshot our update
+            if (savePending) {
+                // An async save is already in flight. Mark dirty so that when
+                // the in-flight save finishes, it schedules a follow-up save
+                // that picks up this update. Without this, an update landing
+                // between snapshot and the in-flight save's completion would
+                // be lost if the server crashed before the next update()
+                // triggered another save.
+                dirty = true;
+                return;
+            }
             savePending = true;
         } finally {
             lock.unlock();
@@ -126,11 +143,15 @@ public class OfflinePositionCache {
 
     /**
      * Synchronous save — only call from onDisable() or reload().
+     * Increments the generation counter so any in-flight async save detects
+     * it was superseded and skips its (now-stale) write.
      */
     public void saveSync() {
         lock.lock();
         try {
-            savePending = false; // cancel any pending async save
+            saveGeneration++;
+            savePending = false;
+            dirty = false;
         } finally {
             lock.unlock();
         }
@@ -141,8 +162,10 @@ public class OfflinePositionCache {
         // Snapshot under lock, then do I/O outside lock
         final YamlConfiguration yaml = new YamlConfiguration();
         final int count;
+        final long myGen;
         lock.lock();
         try {
+            myGen = saveGeneration;
             // Prune stale entries before saving
             long now = System.currentTimeMillis();
             Iterator<Map.Entry<UUID, CachedPosition>> it = cache.entrySet().iterator();
@@ -173,11 +196,41 @@ public class OfflinePositionCache {
             Path tmp = dataFile.resolveSibling("data.yml.tmp");
             String data = yaml.saveToString();
             Files.write(tmp, data.getBytes(StandardCharsets.UTF_8));
-            Files.move(tmp, dataFile, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            try {
+                Files.move(tmp, dataFile, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            } catch (AtomicMoveNotSupportedException amo) {
+                // Network filesystems (NFS/CIFS) and some container overlays
+                // don't support atomic move. Fall back to a non-atomic replace
+                // rather than silently dropping the save.
+                plugin.getLogger().warning("Atomic move unsupported on this filesystem — falling back to non-atomic replace.");
+                Files.move(tmp, dataFile, StandardCopyOption.REPLACE_EXISTING);
+            }
         } catch (IOException e) {
             plugin.getLogger().severe("Failed to save data.yml: " + e.getMessage());
         } finally {
-            savePending = false;
+            // Only commit the save state if our generation is still current.
+            // If saveSync()/clear()/flush() bumped the generation while we
+            // were doing I/O, a newer save has already been written (or is
+            // about to be) — we must NOT overwrite it with our stale snapshot
+            // or reset savePending/dirty in a way that drops the newer save.
+            boolean scheduleFollowUp = false;
+            lock.lock();
+            try {
+                if (myGen == saveGeneration) {
+                    savePending = false;
+                    if (dirty) {
+                        dirty = false;
+                        scheduleFollowUp = true;
+                    }
+                }
+            } finally {
+                lock.unlock();
+            }
+            if (scheduleFollowUp) {
+                // Schedule a follow-up save to pick up updates that landed
+                // while this save was in flight.
+                Bukkit.getScheduler().runTaskAsynchronously(plugin, this::doSave);
+            }
         }
     }
 
@@ -255,6 +308,36 @@ public class OfflinePositionCache {
         }
     }
 
+    /**
+     * Raw cached position snapshot — returns x/y/z + best-guess Dimension
+     * even when the cached world is currently unloaded. Used for offline
+     * player display where we want to show the real last-known coords
+     * rather than "0 0 0 Unknown".
+     *
+     * Bug fix: getCachedLocation() returns null when the world is unloaded,
+     * even though the cache record still holds valid x/y/z. This method
+     * exposes those raw ints so callers can display accurate coordinates
+     * for offline players whose world happens to be unloaded.
+     */
+    @Nullable
+    public RawPos getCachedRaw(@NotNull UUID uuid) {
+        lock.lock();
+        try {
+            CachedPosition cp = cache.get(uuid);
+            if (cp == null) return null;
+            World w = Bukkit.getWorld(cp.worldName);
+            com.crazysmpmods.coordinateannouncer.model.Dimension dim =
+                    (w != null) ? com.crazysmpmods.coordinateannouncer.model.Dimension.fromWorld(w)
+                                : guessDimensionFromName(cp.worldName);
+            return new RawPos(cp.x, cp.y, cp.z, dim);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /** Raw cached position (no World reference — safe even if world is unloaded). */
+    public record RawPos(int x, int y, int z, @NotNull com.crazysmpmods.coordinateannouncer.model.Dimension dim) {}
+
     private com.crazysmpmods.coordinateannouncer.model.Dimension guessDimensionFromName(String name) {
         if (name == null) return com.crazysmpmods.coordinateannouncer.model.Dimension.UNKNOWN;
         String lower = name.toLowerCase();
@@ -290,8 +373,16 @@ public class OfflinePositionCache {
     }
 
     public void clear() {
+        // Bump generation BEFORE clearing so any in-flight async save detects
+        // it was superseded and skips its (now-stale) write — otherwise the
+        // async save could resurrect the purged data after our sync write.
         lock.lock();
-        try { cache.clear(); } finally { lock.unlock(); }
+        try {
+            saveGeneration++;
+            cache.clear();
+        } finally {
+            lock.unlock();
+        }
         saveSync();
     }
 

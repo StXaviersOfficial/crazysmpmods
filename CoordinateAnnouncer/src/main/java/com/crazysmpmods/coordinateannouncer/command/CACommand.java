@@ -370,7 +370,20 @@ public class CACommand implements CommandExecutor, TabCompleter {
             sender.sendMessage("§7Usage: §e/ca console <on|off>");
             return;
         }
-        boolean on = args[1].equalsIgnoreCase("on") || args[1].equalsIgnoreCase("true");
+        // Bug fix: previously any unrecognized value was silently coerced to
+        // false (off). Now we validate explicitly so the operator doesn't
+        // accidentally turn console logging off by typing "enable" or "yes".
+        String v = args[1].toLowerCase();
+        boolean on;
+        if (v.equals("on") || v.equals("true") || v.equals("enable") || v.equals("yes") || v.equals("1")) {
+            on = true;
+        } else if (v.equals("off") || v.equals("false") || v.equals("disable") || v.equals("no") || v.equals("0")) {
+            on = false;
+        } else {
+            sender.sendMessage(ColorScheme.error("Invalid value: §e" + args[1]
+                    + "§f. Use §eon§f or §eoff§f."));
+            return;
+        }
         plugin.getPluginConfig().setAnnounceToConsole(on);
         sender.sendMessage(ColorScheme.success("Console logging: §e" + (on ? "ON" : "OFF")));
     }
@@ -390,8 +403,21 @@ public class CACommand implements CommandExecutor, TabCompleter {
         }
         try {
             long seconds = Long.parseLong(args[1]);
-            if (seconds < 15 && seconds >= 0) {
+            // Bug fix: previously the guard was `seconds < 15 && seconds >= 0`,
+            // which let arbitrary negative numbers through. All negatives are
+            // now treated as the "use regular delay" sentinel — reject anything
+            // other than -1 explicitly to avoid confusion (e.g. /ca firstfire -100
+            // was accepted and stored, then behaved identically to -1).
+            if (seconds < 0 && seconds != -1L) {
+                sender.sendMessage(ColorScheme.error("Use §e/ca firstfire default§f to reset, or a value ≥ 15."));
+                return;
+            }
+            if (seconds >= 0 && seconds < 15) {
                 sender.sendMessage(ColorScheme.error("Minimum first-fire delay is §e15s§f (countdown needs 11s)."));
+                return;
+            }
+            if (seconds > 31_536_000L) {
+                sender.sendMessage(ColorScheme.error("First-fire delay cannot exceed 1 year (31,536,000s)."));
                 return;
             }
             plugin.getPluginConfig().setFirstFireDelaySeconds(seconds);
@@ -432,12 +458,25 @@ public class CACommand implements CommandExecutor, TabCompleter {
 
     private void handleReload(@NotNull CommandSender sender) {
         sender.sendMessage(ColorScheme.info("Reloading config..."));
+        // Bug fix: snapshot whether the task was running BEFORE we stop it.
+        // If load() throws (corrupted YAML, IO error), the old catch returned
+        // without restarting — leaving the plugin in a broken "enabled but
+        // not running" state. Now we restore the previous schedule on failure.
+        boolean wasRunning = plugin.getAnnouncementManager().isRunning();
         plugin.getAnnouncementManager().stop();
         try {
             plugin.getPluginConfig().load();
             plugin.getOfflinePositionCache().load();
         } catch (Exception e) {
-            sender.sendMessage(ColorScheme.error("Reload failed: §e" + e.getMessage()));
+            sender.sendMessage(ColorScheme.error("Reload failed: §e" + e.getMessage()
+                    + "§f. Attempting to resume previous schedule."));
+            if (wasRunning) {
+                try {
+                    plugin.getAnnouncementManager().start();
+                } catch (Exception restartEx) {
+                    plugin.getLogger().severe("Failed to resume announcement task after reload failure: " + restartEx.getMessage());
+                }
+            }
             return;
         }
         if (plugin.getPluginConfig().isEnabled()) {

@@ -62,12 +62,16 @@ public final class CoordinateAnnouncer extends JavaPlugin {
 
         // 6) Register the /ca command
         CACommand cmd = new CACommand(this);
-        if (getCommand("coordinateannouncer") != null) {
-            getCommand("coordinateannouncer").setExecutor(cmd);
-            getCommand("coordinateannouncer").setTabCompleter(cmd);
-        } else {
-            getLogger().severe("Command 'coordinateannouncer' not found in plugin.yml — plugin will not work!");
+        // Bug fix: single lookup; on failure, disable the plugin instead of
+        // continuing in a broken "running but uncontrollable" state.
+        var command = getCommand("coordinateannouncer");
+        if (command == null) {
+            getLogger().severe("Command 'coordinateannouncer' not found in plugin.yml — disabling plugin.");
+            getServer().getPluginManager().disablePlugin(this);
+            return;
         }
+        command.setExecutor(cmd);
+        command.setTabCompleter(cmd);
 
         // 7) Register event listeners
         getServer().getPluginManager().registerEvents(
@@ -89,23 +93,35 @@ public final class CoordinateAnnouncer extends JavaPlugin {
 
     @Override
     public void onDisable() {
-        // Cancel any running countdown / announcement tasks
-        if (announcementManager != null) {
-            announcementManager.stop();
+        try {
+            // Cancel any running countdown / announcement tasks
+            if (announcementManager != null) {
+                announcementManager.stop();
+            }
+            // Save any pending state (synchronous — server is shutting down)
+            if (pluginConfig != null) {
+                pluginConfig.save();
+            }
+            if (offlinePositionCache != null) {
+                offlinePositionCache.flush();
+            }
+            getLogger().info("CoordinateAnnouncer disabled. Settings persisted.");
+        } finally {
+            // Bug fix: clear instance so async threads (e.g. NpcFilter UUID
+            // lookups) don't read a stale reference to a disabled plugin.
+            // Previously getInstance() returned the old instance during the
+            // disable→enable window, causing runTask(oldInstance, …) to fail.
+            instance = null;
         }
-        // Save any pending state (synchronous — server is shutting down)
-        if (pluginConfig != null) {
-            pluginConfig.save();
-        }
-        if (offlinePositionCache != null) {
-            offlinePositionCache.flush();
-        }
-        getLogger().info("CoordinateAnnouncer disabled. Settings persisted.");
     }
 
     // ── Accessors ──────────────────────────────────────────────────────────
 
-    @NotNull
+    /**
+     * Bug fix: returns nullable so callers in async threads (e.g. NpcFilter
+     * UUID lookups) can detect the disable window and bail out instead of
+     * scheduling tasks against a disabled plugin.
+     */
     public static CoordinateAnnouncer getInstance() {
         return instance;
     }

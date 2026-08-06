@@ -2,7 +2,6 @@ package com.crazysmpmods.coordinateannouncer.listener;
 
 import com.crazysmpmods.coordinateannouncer.CoordinateAnnouncer;
 import com.crazysmpmods.coordinateannouncer.util.NpcFilter;
-import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
@@ -79,5 +78,10 @@ public class PlayerPositionListener implements Listener {
 
         // Cache the join position immediately
         plugin.getOfflinePositionCache().update(p.getUniqueId(), p.getName(), p.getLocation());
+        // Bug fix: seed lastUpdate so the first onMove doesn't trigger a
+        // redundant cache write (and a second async save) within milliseconds
+        // of join. Previously lastUpdate was null after join, so onMove's
+        // `if (last != null && ...)` would pass and call update() again.
+        lastUpdate.put(p.getUniqueId(), System.currentTimeMillis());
     }
 }

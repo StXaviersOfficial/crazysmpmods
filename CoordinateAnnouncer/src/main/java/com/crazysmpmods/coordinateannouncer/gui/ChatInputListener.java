@@ -38,19 +38,22 @@ public class ChatInputListener implements Listener {
     private final Consumer<String> callback;
     private volatile boolean fired = false;
 
-    public ChatInputListener(@NotNull Player player, @NotNull Consumer<String> callback) {
-        this.plugin = CoordinateAnnouncer.getInstance();
+    public ChatInputListener(@NotNull CoordinateAnnouncer plugin, @NotNull Player player, @NotNull Consumer<String> callback) {
+        this.plugin = plugin;
         this.player = player;
         this.callback = callback;
     }
 
     @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = false)
     public void onChat(AsyncChatEvent e) {
-        if (fired) return;
         if (!e.getPlayer().equals(player)) return;
-
-        // Cancel the message so it doesn't broadcast to the whole server
+        // Bug fix: previously `if (fired) return;` was BEFORE the player check,
+        // and it returned WITHOUT cancelling — so a second message typed before
+        // the callback tick landed would leak to public chat. Now we cancel
+        // every message from this player while the listener is active, and only
+        // act on the first one.
         e.setCancelled(true);
+        if (fired) return; // already consumed the first message; suppress the rest
         fired = true;
 
         // Extract plain text from the Adventure Component (strips colors/formatting)
@@ -60,6 +63,11 @@ public class ChatInputListener implements Listener {
         // Run callback on main thread (since it touches Bukkit API)
         Bukkit.getScheduler().runTask(plugin, () -> {
             try {
+                // Bug fix: guard against the player having quit between the async
+                // chat event and this main-thread callback. Previously the callback
+                // would mutate config, restart the announcement task, and call
+                // openInventory on an offline player.
+                if (!player.isOnline()) return;
                 callback.accept(message);
             } catch (Throwable t) {
                 plugin.getLogger().warning("ChatInputListener callback threw: " + t.getMessage());

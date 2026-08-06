@@ -70,8 +70,12 @@ public class PluginConfig {
     public void load() {
         lock.lock();
         try {
-            FileConfiguration cfg = plugin.getConfig();
-            // Reload from disk in case of manual edits
+            // Bug fix: load into a FRESH YamlConfiguration instead of mutating
+            // the shared plugin.getConfig() object. If cfg.load() throws
+            // InvalidConfigurationException partway through, the shared config
+            // would be left in a half-parsed state. A fresh object is discarded
+            // on failure, leaving the shared config untouched.
+            YamlConfiguration cfg = new YamlConfiguration();
             cfg.load(configFile.toFile());
 
             this.enabled       = cfg.getBoolean("enabled", false);
@@ -107,16 +111,34 @@ public class PluginConfig {
             this.messagePrefix           = cfg.getString("message-prefix", "");
 
             // Validate
+            boolean needsSave = false;
             if (delayValue <= 0) {
                 plugin.getLogger().warning("Invalid delay value " + delayValue + " — resetting to 60.");
                 delayValue = 60L;
                 delayUnit = DelayUnit.MINUTES;
+                needsSave = true;
             }
             long delaySeconds = delayUnit.toSeconds(delayValue);
             if (delaySeconds < 15) {
                 plugin.getLogger().warning("Delay " + delaySeconds + "s is below minimum 15s — clamping to 15s.");
                 delayValue = 15L;
                 delayUnit = DelayUnit.SECONDS;
+                needsSave = true;
+            }
+            // Bug fix: cap absurdly large delays to 1 year to prevent long
+            // overflow in toTicks() which would crash the scheduler.
+            if (delaySeconds > 31_536_000L) {
+                plugin.getLogger().warning("Delay " + delaySeconds + "s exceeds 1 year — clamping to 1 year.");
+                delayValue = 31_536_000L;
+                delayUnit = DelayUnit.SECONDS;
+                needsSave = true;
+            }
+            // Bug fix: persist clamped values so bad values don't stay on disk
+            // forever and trigger the warning on every startup.
+            if (needsSave) {
+                try { save(); } catch (Exception saveEx) {
+                    plugin.getLogger().warning("Failed to persist config corrections: " + saveEx.getMessage());
+                }
             }
         } catch (Exception e) {
             plugin.getLogger().severe("Failed to load config.yml: " + e.getMessage());
@@ -217,7 +239,17 @@ public class PluginConfig {
             Files.createDirectories(configFile.getParent());
             Path tmp = configFile.resolveSibling("config.yml.tmp");
             Files.write(tmp, data.getBytes(StandardCharsets.UTF_8));
-            Files.move(tmp, configFile, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            // Bug fix: fall back to non-atomic move on filesystems that don't
+            // support ATOMIC_MOVE (NFS, CIFS, some container overlays).
+            // Previously, AtomicMoveNotSupportedException was caught by the
+            // generic IOException handler, leaving the temp file behind and
+            // the real config never updated.
+            try {
+                Files.move(tmp, configFile, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            } catch (java.nio.file.AtomicMoveNotSupportedException amo) {
+                plugin.getLogger().warning("Atomic move unsupported on this filesystem — falling back to non-atomic replace.");
+                Files.move(tmp, configFile, StandardCopyOption.REPLACE_EXISTING);
+            }
         } catch (IOException e) {
             plugin.getLogger().severe("Failed to save config.yml: " + e.getMessage());
         } finally {
@@ -317,6 +349,14 @@ public class PluginConfig {
             plugin.getLogger().warning("setDelay(" + value + ", " + unit + "): " + seconds
                     + "s is below minimum 15s, clamping to 15s");
             value = 15;
+            unit = DelayUnit.SECONDS;
+        }
+        // Bug fix: cap at 1 year to prevent long overflow in toTicks()
+        // which would crash the scheduler with IllegalArgumentException.
+        if (seconds > 31_536_000L) {
+            plugin.getLogger().warning("setDelay(" + value + ", " + unit + "): " + seconds
+                    + "s exceeds 1 year, clamping to 1 year");
+            value = 31_536_000L;
             unit = DelayUnit.SECONDS;
         }
         lock.lock();
@@ -419,6 +459,14 @@ public class PluginConfig {
     }
 
     public void setFirstFireDelaySeconds(long seconds) {
+        // Bug fix: cap at 1 year to prevent long overflow in start() where
+        // firstFireTicks = clamped * 20L would overflow to a negative long
+        // and crash the scheduler with IllegalArgumentException.
+        if (seconds > 31_536_000L) {
+            plugin.getLogger().warning("setFirstFireDelaySeconds(" + seconds
+                    + "): exceeds 1 year, clamping to 1 year");
+            seconds = 31_536_000L;
+        }
         lock.lock();
         try { this.firstFireDelaySeconds = seconds; } finally { lock.unlock(); }
         save();

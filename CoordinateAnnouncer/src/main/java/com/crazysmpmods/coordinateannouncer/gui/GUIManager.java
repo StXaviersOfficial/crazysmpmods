@@ -40,9 +40,14 @@ import java.util.*;
 public class GUIManager implements Listener {
 
     private final CoordinateAnnouncer plugin;
-    private final Map<UUID, GUISession> sessions = new HashMap<>();
+    // Bug fix: use ConcurrentHashMap for defensive future-proofing. Today all
+    // access is main-thread, but the codebase mixes async and sync paths
+    // (NpcFilter, ChatInputListener), so a future refactor that touches these
+    // maps from an async callback would corrupt HashMap. ConcurrentHashMap is
+    // safe under concurrent access.
+    private final Map<UUID, GUISession> sessions = new java.util.concurrent.ConcurrentHashMap<>();
     // Tracks the active chat-input listener per player so we never stack duplicates.
-    private final Map<UUID, ChatInputListener> activeChatListeners = new HashMap<>();
+    private final Map<UUID, ChatInputListener> activeChatListeners = new java.util.concurrent.ConcurrentHashMap<>();
 
     public GUIManager(@NotNull CoordinateAnnouncer plugin) {
         this.plugin = plugin;
@@ -452,7 +457,7 @@ public class GUIManager implements Listener {
                 p.closeInventory();
                 p.sendMessage(ColorScheme.PRIMARY + "§lType the new delay value in chat:");
                 p.sendMessage("§7Type a number (e.g., §e60§7) or §ecancel§7 to abort.");
-                ChatInputListener listener = new ChatInputListener(p, value -> {
+                ChatInputListener listener = new ChatInputListener(plugin, p, value -> {
                     try {
                         // Handle "cancel"
                         if (value.trim().equalsIgnoreCase("cancel")) {
@@ -538,7 +543,12 @@ public class GUIManager implements Listener {
             List<CustomPlayer> players = plugin.getPluginConfig().getCustomPlayers();
             if (index >= 0 && index < players.size()) {
                 CustomPlayer cp = players.get(index);
-                boolean removed = plugin.getPluginConfig().removeCustomPlayerByName(cp.name());
+                // Bug fix: remove by UUID, not by name. removeCustomPlayerByName
+                // uses equalsIgnoreCase on the name, which would delete ALL
+                // entries sharing that display name (e.g. two distinct UUIDs
+                // with the same name). The user clicked ONE head — remove
+                // exactly that one entry.
+                boolean removed = plugin.getPluginConfig().removeCustomPlayer(cp.uuid());
                 if (removed) {
                     p.sendMessage(ColorScheme.success("Removed §e" + cp.name() + "§f from custom list."));
                     p.playSound(p.getLocation(), org.bukkit.Sound.ENTITY_ITEM_PICKUP, 0.5f, 1.0f);
