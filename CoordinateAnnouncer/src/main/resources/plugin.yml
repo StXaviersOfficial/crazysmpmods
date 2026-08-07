@@ -48,3 +48,9 @@ permissions:
   coordinateannouncer.admin:
     description: Allows use of all Coordinate Announcer commands (OP-only by default).
     default: op
+
+# Soft-depend on PlaceholderAPI for placeholder support
+# Soft-depend on Essentials for vanish detection
+softdepend:
+  - PlaceholderAPI
+  - Essentials

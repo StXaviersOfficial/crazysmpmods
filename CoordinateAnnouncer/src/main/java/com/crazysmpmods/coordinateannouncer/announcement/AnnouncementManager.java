@@ -246,6 +246,10 @@ public class AnnouncementManager {
             result = new ArrayList<>(onlineCount);
             for (Player p : Bukkit.getOnlinePlayers()) {
                 if (NpcFilter.isNpc(p, cfg.isFilterNpcs())) continue;
+                // Bug fix (v1.4.0): skip vanished players (Essentials /vanish)
+                if (p.hasMetadata("vanished") || p.hasMetadata("essentials_vanish")) continue;
+                // Bug fix (v1.4.0): skip players in spectator mode (likely staff)
+                if (p.getGameMode() == org.bukkit.GameMode.SPECTATOR) continue;
                 result.add(PlayerCoordinate.live(p.getName(), p.getLocation()));
             }
         } else {
@@ -255,6 +259,9 @@ public class AnnouncementManager {
                 Player online = Bukkit.getPlayer(cp.uuid());
                 if (online != null && online.isOnline()) {
                     if (NpcFilter.isNpc(online, cfg.isFilterNpcs())) continue;
+                    // Bug fix (v1.4.0): skip vanished players
+                    if (online.hasMetadata("vanished") || online.hasMetadata("essentials_vanish")) continue;
+                    if (online.getGameMode() == org.bukkit.GameMode.SPECTATOR) continue;
                     result.add(PlayerCoordinate.live(online.getName(), online.getLocation()));
                 } else {
                     // Offline

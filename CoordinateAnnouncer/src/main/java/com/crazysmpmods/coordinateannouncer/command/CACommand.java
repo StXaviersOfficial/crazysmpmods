@@ -75,6 +75,7 @@ public class CACommand implements CommandExecutor, TabCompleter {
             case "prefix" -> handlePrefix(sender, args);
             case "console"-> handleConsole(sender, args);
             case "firstfire" -> handleFirstFire(sender, args);
+            case "mute"   -> handleMute(sender);
             case "reload" -> handleReload(sender);
             case "help"   -> sendHelp(sender, label);
             default -> {
@@ -456,6 +457,28 @@ public class CACommand implements CommandExecutor, TabCompleter {
         sender.sendMessage(ColorScheme.DIVIDER);
     }
 
+
+    private boolean announcementsMuted = false;
+    
+    private void handleMute(@NotNull CommandSender sender) {
+        announcementsMuted = !announcementsMuted;
+        if (announcementsMuted) {
+            // Cancel any running countdown
+            plugin.getAnnouncementManager().stop();
+            sender.sendMessage(ColorScheme.success("Announcements §cMUTED§f. Countdown cancelled. Use §e/ca mute §fagain to unmute."));
+        } else {
+            // Restart if enabled
+            if (plugin.getPluginConfig().isEnabled()) {
+                plugin.getAnnouncementManager().restart();
+            }
+            sender.sendMessage(ColorScheme.success("Announcements §aUNMUTED§f."));
+        }
+    }
+    
+    public boolean isAnnouncementsMuted() {
+        return announcementsMuted;
+    }
+
     private void handleReload(@NotNull CommandSender sender) {
         sender.sendMessage(ColorScheme.info("Reloading config..."));
         // Bug fix: snapshot whether the task was running BEFORE we stop it.
@@ -509,6 +532,7 @@ public class CACommand implements CommandExecutor, TabCompleter {
         sender.sendMessage("§e/" + label + " console <on|off> §7- Toggle console logging");
         sender.sendMessage("§e/" + label + " status §7- Show current settings (alias: info)");
         sender.sendMessage("§e/" + label + " version §7- Show plugin version + Bedrock support info");
+        sender.sendMessage("§e/" + label + " mute §7- Toggle announcements on/off (for events/war)");
         sender.sendMessage("§e/" + label + " purge §7- Clear all cached positions from data.yml");
         sender.sendMessage("§e/" + label + " reload §7- Reload config from disk");
         sender.sendMessage("§e/" + label + " help §7- Show this help");
@@ -521,7 +545,7 @@ public class CACommand implements CommandExecutor, TabCompleter {
 
     private static final List<String> SUBS = Arrays.asList(
             "toggle", "gui", "delay", "player", "mode", "offline",
-            "test", "now", "info", "status", "purge", "version",
+            "test", "now", "info", "status", "purge", "mute", "version",
             "prefix", "console", "firstfire", "reload", "help");
     private static final List<String> PLAYER_SUBS = Arrays.asList(
             "add", "remove", "list", "clear");
